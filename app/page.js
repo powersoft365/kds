@@ -474,7 +474,7 @@ function KdsPro() {
               No orders to display.
             </p>
           ) : (
-            <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2  2xl:grid-cols-4">
               {pageSlice.map((o, idx) => (
                 <OrderCard
                   key={`${o.id}-${o.ts}-${o.dest}-${idx}`} // collision-proof key

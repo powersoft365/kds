@@ -9,7 +9,6 @@ import {
   CardFooter,
   CardHeader,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -23,10 +22,10 @@ export function OrderCard({
   order,
   toggleItemState,
   onPrimaryAction,
-  onUndoAction,
+  onUndoAction, // called after slide hits 100%
   setEtaDialog,
   setOrderDialog,
-  t,
+  t = (s) => s, // safe fallback for i18n
   timeElapsedMin,
   calcSubStatus,
   actionLabelAndClass,
@@ -36,27 +35,43 @@ export function OrderCard({
 }) {
   const elapsed = timeElapsedMin(order);
   const sub = calcSubStatus(order);
-  const { label, cls } = actionLabelAndClass(order);
+  const { label: actionText = "Action", cls: actionClass = "" } =
+    actionLabelAndClass(order) || {};
   const isCompleted = order.status === "completed";
 
-  // Minimal slide-to-undo
+  // Detect if this card is being rendered inside a dialog (modal).
+  // If yes, hide the “Details” button and center the remaining action button.
+  const rootRef = React.useRef(null);
+  const [insideDialog, setInsideDialog] = React.useState(false);
+  React.useEffect(() => {
+    try {
+      const el = rootRef.current;
+      if (!el) return;
+      const inDialog = !!el.closest('[role="dialog"]');
+      setInsideDialog(inDialog);
+    } catch {
+      setInsideDialog(false);
+    }
+  }, []);
+
+  // ---- Slide-to-Undo (enabled only for completed orders) ----
   const [undoOpen, setUndoOpen] = React.useState(false);
   const [slideVal, setSlideVal] = React.useState([0]);
-  const [isConfirming, setIsConfirming] = React.useState(false);
+  const [confirmingUndo, setConfirmingUndo] = React.useState(false);
 
   const openUndo = () => {
     setSlideVal([0]);
-    setIsConfirming(false);
+    setConfirmingUndo(false);
     setUndoOpen(true);
   };
   const closeUndo = () => {
     setUndoOpen(false);
-    setIsConfirming(false);
+    setConfirmingUndo(false);
     setSlideVal([0]);
   };
   const triggerUndo = () => {
-    if (isConfirming) return;
-    setIsConfirming(true);
+    if (confirmingUndo) return;
+    setConfirmingUndo(true);
     try {
       onUndoAction && onUndoAction(order);
     } finally {
@@ -68,6 +83,7 @@ export function OrderCard({
     if (val >= 100) triggerUndo();
   };
 
+  // ---- Group items by department for display ----
   const itemsByDept = (order.items || []).reduce((acc, it) => {
     const d = it.dept || "General";
     if (!acc[d]) acc[d] = [];
@@ -92,165 +108,187 @@ export function OrderCard({
 
   return (
     <>
-      <Card
-        className={`h-full border-t-8 ${statusBorder(order)} ${
-          sub === "on-hold" ? "shadow-[0_0_25px_rgba(139,92,246,0.6)]" : ""
-        } hover:shadow-lg transition-shadow grid grid-rows-[auto_1fr_auto]`}
-      >
-        {/* Header */}
-        <CardHeader className="flex flex-row items-center justify-between bg-muted/50 py-3">
-          <div className="space-y-0.5">
-            <div className="font-extrabold text-xl tracking-tight">
-              #{order.id}
-            </div>
-            <div className="text-sm text-muted-foreground">
-              {order.dest} ({order.type})
-            </div>
-          </div>
-          {sub ? (
-            <span className={subStatusBadge(sub)}>{sub.toUpperCase()}</span>
-          ) : null}
-        </CardHeader>
-
-        {/* Content */}
-        <CardContent className="pt-4 pb-2">
-          <div className="relative max-h-[38vh] md:max-h-[28vh] lg:max-h-[240px] overflow-y-auto pr-1">
-            {Object.entries(itemsByDept).map(([dept, items]) => (
-              <div key={dept} className="mb-3">
-                {showDeptHeaders && (
-                  <div className="font-bold text-base border-b pb-1 mb-2">
-                    {dept}
-                  </div>
-                )}
-                <ul className="space-y-2">
-                  {items.map((it) => {
-                    const isChecked = it.itemStatus === "checked";
-                    const isCancelled = it.itemStatus === "cancelled";
-                    const canToggle = !isCompleted;
-
-                    return (
-                      <li
-                        key={`${order.id}-${dept}-${it.id}`}
-                        className="grid grid-cols-[auto_auto_1fr] gap-3 items-center pb-2 border-b last:border-0 rounded cursor-pointer hover:bg-muted/30 transition-colors"
-                        onClick={() =>
-                          canToggle && toggleItemState(order.id, it.id)
-                        }
-                      >
-                        <div className={triBoxCls(it.itemStatus)}>
-                          {isChecked ? (
-                            <Check className="w-4 h-4" />
-                          ) : isCancelled ? (
-                            <X className="w-4 h-4" />
-                          ) : null}
-                        </div>
-
-                        <div className="font-extrabold text-lg md:text-xl">
-                          {it.qty}x
-                        </div>
-
-                        <div className="min-w-0">
-                          <div
-                            className={`font-bold text-base md:text-lg truncate ${
-                              it.itemStatus !== "none"
-                                ? "line-through text-muted-foreground"
-                                : ""
-                            }`}
-                          >
-                            {it.name}
-                          </div>
-                          <div
-                            className={`text-xs md:text-sm truncate ${
-                              isCancelled
-                                ? "line-through text-red-600"
-                                : isChecked
-                                ? "line-through text-muted-foreground"
-                                : "text-muted-foreground"
-                            }`}
-                            title={(it.mods || []).join(", ")}
-                          >
-                            {(it.mods || []).join(", ")}
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+      <div ref={rootRef} className="contents">
+        <Card
+          className={`h-full border-t-8 ${statusBorder(order)} ${
+            sub === "on-hold" ? "shadow-[0_0_25px_rgba(139,92,246,0.6)]" : ""
+          } hover:shadow-lg transition-shadow grid grid-rows-[auto_1fr_auto] overflow-hidden`}
+        >
+          {/* Header */}
+          <CardHeader className="flex flex-row items-center justify-between bg-muted/50 py-3">
+            <div className="space-y-0.5">
+              <div className="font-extrabold text-xl tracking-tight">
+                #{order.id}
               </div>
-            ))}
-          </div>
-        </CardContent>
-
-        {/* Footer */}
-        <CardFooter className="bg-muted/50 grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-2 items-center">
-          {/* ETA */}
-          <button
-            className="text-left md:text-center order-2 md:order-1"
-            onClick={() => setEtaDialog({ open: true, orderId: order.id })}
-          >
-            <div className="text-xs text-muted-foreground font-medium">
-              {t("time_eta")}
+              <div className="text-sm text-muted-foreground">
+                {order.dest} ({order.type})
+              </div>
             </div>
-            <div className="font-extrabold text-lg md:text-xl flex items-center gap-2">
-              <Clock className="w-5 h-5" /> {elapsed} / {order.eta} min
+            {sub ? (
+              <span className={subStatusBadge(sub)}>{sub.toUpperCase()}</span>
+            ) : null}
+          </CardHeader>
+
+          {/* Content */}
+          <CardContent className="pt-4 pb-2">
+            <div className="relative max-h-[38vh] md:max-h-[28vh] lg:max-h-[240px] overflow-y-auto pr-1">
+              {Object.entries(itemsByDept).map(([dept, items]) => (
+                <div key={dept} className="mb-3">
+                  {showDeptHeaders && (
+                    <div className="font-bold text-base border-b pb-1 mb-2">
+                      {dept}
+                    </div>
+                  )}
+                  <ul className="space-y-2">
+                    {items.map((it) => {
+                      const isChecked = it.itemStatus === "checked";
+                      const isCancelled = it.itemStatus === "cancelled";
+                      const canToggle = !isCompleted;
+
+                      return (
+                        <li
+                          key={`${order.id}-${dept}-${it.id}`}
+                          className="grid grid-cols-[auto_auto_1fr] gap-3 items-center pb-2 border-b last:border-0 rounded cursor-pointer hover:bg-muted/30 transition-colors"
+                          onClick={() =>
+                            canToggle && toggleItemState(order.id, it.id)
+                          }
+                        >
+                          <div className={triBoxCls(it.itemStatus)}>
+                            {isChecked ? (
+                              <Check className="w-4 h-4" />
+                            ) : isCancelled ? (
+                              <X className="w-4 h-4" />
+                            ) : null}
+                          </div>
+
+                          <div className="font-extrabold text-lg md:text-xl">
+                            {it.qty}x
+                          </div>
+
+                          <div className="min-w-0">
+                            <div
+                              className={`font-bold text-base md:text-lg truncate ${
+                                it.itemStatus !== "none"
+                                  ? "line-through text-muted-foreground"
+                                  : ""
+                              }`}
+                            >
+                              {it.name}
+                            </div>
+                            <div
+                              className={`text-xs md:text-sm truncate ${
+                                isCancelled
+                                  ? "line-through text-red-600"
+                                  : isChecked
+                                  ? "line-through text-muted-foreground"
+                                  : "text-muted-foreground"
+                              }`}
+                              title={(it.mods || []).join(", ")}
+                            >
+                              {(it.mods || []).join(", ")}
+                            </div>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
             </div>
-          </button>
+          </CardContent>
 
-          {/* Actions */}
-          <div className="flex items-center justify-end gap-2 order-1 md:order-2">
-            {isCompleted ? (
-              <Button
-                className="bg-slate-700 hover:bg-slate-800 font-bold"
-                onClick={openUndo}
-                title={t("undo_completed")}
+          {/* Footer — full-bleed background attached to the bottom */}
+          <CardFooter className="p-0">
+            <div className="bg-muted/50 w-full flex flex-col gap-3 p-4">
+              {/* centered time row */}
+              <button
+                className="w-full text-center"
+                onClick={() => setEtaDialog({ open: true, orderId: order.id })}
               >
-                <Undo2 className="w-4 h-4 mr-2" />
-                {t("undo_completed")}
-              </Button>
-            ) : (
-              <Button
-                className={`${cls} font-bold`}
-                onClick={() => onPrimaryAction(order)}
-              >
-                {label}
-              </Button>
-            )}
+                <div className="text-xs text-muted-foreground font-medium">
+                  {t("time_eta")}
+                </div>
+                <div className="font-extrabold text-base flex items-center justify-center gap-2">
+                  <Clock className="w-4 h-4" />
+                  {t("Time")} {elapsed}/{order.eta}
+                </div>
+              </button>
 
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setOrderDialog({ open: true, orderId: order.id })}
-              aria-label={t("view_order_details") || "View details"}
-            >
-              <Maximize2 className="w-5 h-5" />
-            </Button>
-          </div>
-        </CardFooter>
-      </Card>
+              {/* actions */}
+              {insideDialog ? (
+                // In modal: if completed, hide the Undo button entirely.
+                // If not completed, show a single centered primary action.
+                !isCompleted ? (
+                  <div className="flex justify-center">
+                    <Button
+                      className={`w-full sm:max-w-xs justify-center font-bold ${actionClass}`}
+                      onClick={() => onPrimaryAction(order)}
+                    >
+                      {actionText}
+                    </Button>
+                  </div>
+                ) : null
+              ) : (
+                // In grid: primary + details (and show Undo for completed)
+                <div className="grid grid-cols-2 gap-3">
+                  {isCompleted ? (
+                    <Button
+                      className="w-full justify-center font-bold bg-slate-700 hover:bg-slate-800"
+                      onClick={openUndo}
+                      title={t("Undo")}
+                    >
+                      <Undo2 className="w-4 h-4 mr-2" />
+                      {t("Undo")}
+                    </Button>
+                  ) : (
+                    <Button
+                      className={`w-full justify-center font-bold ${actionClass}`}
+                      onClick={() => onPrimaryAction(order)}
+                    >
+                      {actionText}
+                    </Button>
+                  )}
 
-      {/* Minimal Slide-to-Undo Dialog (shadcn-only, accessible) */}
+                  <Button
+                    variant="outline"
+                    className="w-full justify-center font-bold"
+                    onClick={() =>
+                      setOrderDialog({ open: true, orderId: order.id })
+                    }
+                    aria-label={t("View details")}
+                  >
+                    <Maximize2 className="w-4 h-4 mr-2" />
+                    {t("Details")}
+                  </Button>
+                </div>
+              )}
+            </div>
+          </CardFooter>
+        </Card>
+      </div>
+
+      {/* Slide-to-Undo dialog (only used from the completed tab) */}
       <Dialog
         open={undoOpen}
         onOpenChange={(o) => (o ? openUndo() : closeUndo())}
       >
         <DialogContent className="sm:max-w-lg p-0 overflow-hidden">
           <DialogHeader>
-            {/* Required for a11y, visually hidden */}
             <DialogTitle className="sr-only">
-              {t("slide_right_to_undo") || "Slide right to undo"}
+              {t("Slide right to undo")}
             </DialogTitle>
           </DialogHeader>
 
-          {/* Compact handle */}
+          {/* drag handle */}
           <div className="flex items-center justify-center py-3 bg-muted/50">
             <div className="h-1.5 w-12 rounded-full bg-muted-foreground/40" />
           </div>
 
-          {/* Big, obvious slider with full-rail drag */}
           <SlideToUndo
             value={slideVal[0]}
             setValue={(p) => setSlideVal([p])}
             onCommit={() => onSlideCommit(slideVal)}
-            label={t("slide_right_to_undo") || "Slide right to undo"}
+            label={t("Slide right to undo")}
           />
         </DialogContent>
       </Dialog>
@@ -261,8 +299,8 @@ export function OrderCard({
 /**
  * SlideToUndo
  * - Whole rail is draggable (pointer events on container)
- * - Large pill "button" that can be dragged from left to right
- * - Still uses shadcn Slider underneath for keyboard/a11y
+ * - Large pill that drags left→right
+ * - Uses shadcn Slider under the hood for keyboard / a11y
  */
 function SlideToUndo({ value, setValue, onCommit, label }) {
   const railRef = React.useRef(null);
@@ -296,7 +334,7 @@ function SlideToUndo({ value, setValue, onCommit, label }) {
     onCommit?.();
   };
 
-  // Keyboard / a11y path via Slider:
+  // Keyboard / a11y path via Slider
   const onSliderChange = (v) => setValue(Array.isArray(v) ? v[0] : v);
   const onSliderCommit = (v) => {
     const val = Array.isArray(v) ? v[0] : v;
@@ -316,34 +354,33 @@ function SlideToUndo({ value, setValue, onCommit, label }) {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
-        {/* Progress fill */}
+        {/* progress fill */}
         <div
           className="absolute inset-y-0 left-0 rounded-2xl bg-emerald-500/25 pointer-events-none"
           style={{ width: `${Math.min(value, 100)}%` }}
         />
 
-        {/* Center hint (fades as you drag) */}
+        {/* center hint */}
         <div
           className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity"
           style={{ opacity: value < 15 ? 1 : 0 }}
         >
           <div className="flex items-center gap-1 text-xs sm:text-sm font-semibold text-muted-foreground">
             <ChevronRight className="w-4 h-4" />
-
             <ChevronRight className="w-4 h-4" />
           </div>
         </div>
 
-        {/* Big draggable pill */}
+        {/* draggable pill */}
         <div
-          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full bg-background border border-muted-foreground/30 shadow flex items-center justify-center font-semibold px-2 h-12  pointer-events-none"
+          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full bg-background border border-muted-foreground/30 shadow flex items-center justify-center font-semibold px-2 h-12 pointer-events-none"
           style={{ left: `calc(${Math.min(value, 100)}% + 8px)` }}
           aria-hidden="true"
         >
           <Undo2 className="w-5 h-5 mr-2" />
         </div>
 
-        {/* Hidden-but-focusable Slider for keyboard & screen readers */}
+        {/* hidden slider for a11y */}
         <Slider
           value={[value]}
           onValueChange={onSliderChange}
@@ -356,7 +393,7 @@ function SlideToUndo({ value, setValue, onCommit, label }) {
         />
       </div>
 
-      {/* Tiny footer row */}
+      {/* tiny footer */}
       <div className="mt-3 flex items-center justify-between">
         <div className="text-[10px] sm:text-xs text-muted-foreground select-none">
           {Math.round(value)}%
