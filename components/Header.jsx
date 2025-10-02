@@ -15,7 +15,6 @@ import {
   Moon,
 } from "lucide-react";
 
-// shadcn dropdown
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -25,14 +24,6 @@ import {
   DropdownMenuCheckboxItem,
 } from "@/components/ui/dropdown-menu";
 
-/**
- * Responsive, mobile-friendly Header
- * - Sticky top bar
- * - Desktop: full tabs row, inline search, dept filters as pills or dropdown
- * - Mobile: compact top bar + slide-down tray with search & filters
- * - Horizontal scroll on mobile tabs and dept pills for overflow
- * - Accessible labels and keyboard-friendly controls
- */
 export function Header({
   currentTime,
   headerTabs = [],
@@ -41,6 +32,7 @@ export function Header({
   counts = {},
   searchTerm,
   setSearchTerm,
+  onSearchEnter = () => {}, // <<< NEW (used to GET by shopping cart code)
   t = (k) => k,
   departments = [],
   selectedDepts = [],
@@ -49,7 +41,6 @@ export function Header({
 }) {
   const [isMobileTrayOpen, setIsMobileTrayOpen] = React.useState(false);
 
-  // Label for dropdown button when many departments exist
   const selectedCountLabel = React.useMemo(() => {
     const isAll = selectedDepts.includes("All");
     const count = isAll ? 1 : selectedDepts.length || 0;
@@ -119,9 +110,7 @@ export function Header({
       className="w-full border-b bg-background sticky top-0 z-30"
       style={{ borderBottomWidth: 3 }}
     >
-      {/* Top Row */}
       <div className="flex h-[60px] md:h-[65px] items-center justify-between gap-2 md:gap-3 px-3 md:px-4">
-        {/* Brand + Time */}
         <div className="flex items-center gap-3 md:gap-4 min-w-0">
           <h1 className="tracking-widest font-extrabold text-lg md:text-xl lg:text-2xl truncate">
             Baresto Pro
@@ -134,7 +123,6 @@ export function Header({
           </div>
         </div>
 
-        {/* Desktop Tabs */}
         <nav className="hidden md:flex items-stretch gap-1">
           {headerTabs.map((tab) => {
             const isActive = activeTab === tab.key;
@@ -161,9 +149,8 @@ export function Header({
           })}
         </nav>
 
-        {/* Actions */}
         <div className="flex items-center gap-2 md:gap-3">
-          {/* Search (desktop) */}
+          {/* Desktop search with Enter handler */}
           <div className="relative hidden md:block">
             <Search
               className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"
@@ -172,6 +159,9 @@ export function Header({
             <Input
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") onSearchEnter(e.target.value.trim());
+              }}
               placeholder={t("search_placeholder")}
               className="pl-9 w-[160px] md:w-[220px] lg:w-[280px]"
               inputMode="search"
@@ -179,12 +169,10 @@ export function Header({
             />
           </div>
 
-          {/* Departments (desktop) */}
           <div className="hidden lg:block">
             {departments.length <= 5 ? DeptPills : DeptDropdown}
           </div>
 
-          {/* Settings */}
           <Button
             variant="ghost"
             size="icon"
@@ -194,12 +182,10 @@ export function Header({
             <Moon className="w-5 h-5" />
           </Button>
 
-          {/* Power / Logout */}
           <Button variant="ghost" size="icon" aria-label="Power">
             <Power className="w-5 h-5" />
           </Button>
 
-          {/* Mobile Tray Toggle */}
           <Button
             variant="ghost"
             size="icon"
@@ -218,7 +204,7 @@ export function Header({
         </div>
       </div>
 
-      {/* Mobile Tabs: horizontally scrollable */}
+      {/* mobile tabs */}
       <nav className="md:hidden border-t px-2 pb-1">
         <div className="flex gap-1 overflow-x-auto snap-x snap-mandatory scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent">
           {headerTabs.map((tab) => {
@@ -247,14 +233,13 @@ export function Header({
         </div>
       </nav>
 
-      {/* Mobile Slide-Down Tray */}
+      {/* Mobile tray */}
       <div
         id="mobile-tray"
         className={`md:hidden grid grid-cols-1 gap-3 px-3 pb-3 border-t overflow-hidden transition-[max-height,opacity] duration-300 ${
           isMobileTrayOpen ? "max-h-[520px] opacity-100" : "max-h-0 opacity-0"
         }`}
       >
-        {/* Search */}
         <div className="relative">
           <Search
             className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"
@@ -263,17 +248,19 @@ export function Header({
           <Input
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                onSearchEnter(e.target.value.trim());
+                onToggleMobileTray();
+              }
+            }}
             placeholder={t("search_placeholder")}
             className="pl-9 w-full"
             inputMode="search"
             aria-label="Search orders"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") closeMobileTray();
-            }}
           />
         </div>
 
-        {/* Departments (mobile): pills or dropdown with horizontal scroll */}
         <div className="lg:hidden">
           {departments.length <= 5 ? (
             <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent">
@@ -284,14 +271,13 @@ export function Header({
           )}
         </div>
 
-        {/* Quick actions row */}
         <div className="flex gap-2">
           <Button
             variant="secondary"
             className="flex-1"
             onClick={() => {
               setSettingsDialog(true);
-              closeMobileTray();
+              onToggleMobileTray();
             }}
           >
             <Settings className="w-4 h-4 mr-2" />
@@ -300,7 +286,7 @@ export function Header({
           <Button
             variant="outline"
             className="flex-1"
-            onClick={closeMobileTray}
+            onClick={onToggleMobileTray}
           >
             Done
           </Button>
