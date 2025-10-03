@@ -18,29 +18,45 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Maximize2, Check, X, Clock, Undo2, ChevronRight } from "lucide-react";
 
+/**
+ * OrderCard
+ * - FIX: when sub-status is "delayed" the card top border becomes RED.
+ * - If order is cooking and NOT ready to complete → clicking primary button opens "revert" slider.
+ * - If all items are checked (button shows COMPLETE) → clicking completes (no revert modal).
+ */
 export function OrderCard({
   order,
   toggleItemState,
-  onPrimaryAction,
-  onUndoAction, // called after slide hits 100%
+  onPrimaryAction, // START COOKING or COMPLETE
+  onUndoAction, // completed → active
+  onRevertAction, // cooking → pending (revert)
   setEtaDialog,
   setOrderDialog,
-  t = (s) => s, // safe fallback for i18n
+  t = (s) => s,
   timeElapsedMin,
   calcSubStatus,
   actionLabelAndClass,
-  statusBorder,
+  statusBorder, // function that returns a border class for non-delayed states
   triBoxCls,
   selectedDepts,
 }) {
   const elapsed = timeElapsedMin(order);
-  const sub = calcSubStatus(order);
+  const sub = calcSubStatus(order); // e.g. "cooking", "delayed", "on-hold", "completed"
   const { label: actionText = "Action", cls: actionClass = "" } =
     actionLabelAndClass(order) || {};
   const isCompleted = order.status === "completed";
+  const isCooking = !!order.cooking && !isCompleted;
 
-  // Detect if this card is being rendered inside a dialog (modal).
-  // If yes, hide the “Details” button and center the remaining action button.
+  // Are all items checked (ready to COMPLETE)?
+  const readyToComplete = React.useMemo(
+    () =>
+      Array.isArray(order.items) &&
+      order.items.length > 0 &&
+      order.items.every((i) => i.itemStatus === "checked"),
+    [order.items]
+  );
+
+  // Detect if rendered inside a dialog (to tweak layout)
   const rootRef = React.useRef(null);
   const [insideDialog, setInsideDialog] = React.useState(false);
   React.useEffect(() => {
@@ -54,7 +70,7 @@ export function OrderCard({
     }
   }, []);
 
-  // ---- Slide-to-Undo (enabled only for completed orders) ----
+  // ---- Slide-to-Undo (completed → active) ----
   const [undoOpen, setUndoOpen] = React.useState(false);
   const [slideVal, setSlideVal] = React.useState([0]);
   const [confirmingUndo, setConfirmingUndo] = React.useState(false);
@@ -83,6 +99,35 @@ export function OrderCard({
     if (val >= 100) triggerUndo();
   };
 
+  // ---- Slide-to-Revert (cooking → pending) ----
+  const [revertOpen, setRevertOpen] = React.useState(false);
+  const [slideValRev, setSlideValRev] = React.useState([0]);
+  const [confirmingRevert, setConfirmingRevert] = React.useState(false);
+
+  const openRevert = () => {
+    setSlideValRev([0]);
+    setConfirmingRevert(false);
+    setRevertOpen(true);
+  };
+  const closeRevert = () => {
+    setRevertOpen(false);
+    setConfirmingRevert(false);
+    setSlideValRev([0]);
+  };
+  const triggerRevert = () => {
+    if (confirmingRevert) return;
+    setConfirmingRevert(true);
+    try {
+      onRevertAction && onRevertAction(order);
+    } finally {
+      setTimeout(() => closeRevert(), 150);
+    }
+  };
+  const onSlideRevertCommit = (v) => {
+    const val = Array.isArray(v) ? v[0] : v;
+    if (val >= 100) triggerRevert();
+  };
+
   // ---- Group items by department for display ----
   const itemsByDept = (order.items || []).reduce((acc, it) => {
     const d = it.dept || "General";
@@ -99,18 +144,30 @@ export function OrderCard({
   const subStatusBadge = (val) => {
     if (!val) return "";
     const base = "px-2.5 py-1 rounded-full text-xs font-bold";
-    if (val === "delayed") return `${base} bg-red-500 text-white`;
-    if (val === "on-hold") return `${base} bg-violet-500 text-white`;
+    if (val === "delayed") return `${base} bg-red-600 text-white`;
+    if (val === "on-hold") return `${base} bg-violet-600 text-white`;
     if (val === "cooking") return `${base} bg-amber-500 text-white`;
     if (val === "completed") return `${base} bg-emerald-600 text-white`;
     return `${base} bg-slate-600 text-white`;
   };
 
+  // ✅ Keep old UI: open revert slider only when cooking and NOT ready to complete.
+  const handlePrimaryClick = () => {
+    if (isCooking && !readyToComplete) {
+      openRevert();
+    } else {
+      onPrimaryAction && onPrimaryAction(order);
+    }
+  };
+
+  // ✅ NEW: if sub-status is "delayed", force red top border
+  const borderCls = sub === "delayed" ? "border-red-600" : statusBorder(order);
+
   return (
     <>
       <div ref={rootRef} className="contents">
         <Card
-          className={`h-full border-t-8 ${statusBorder(order)} ${
+          className={`h-full border-t-8 ${borderCls} ${
             sub === "on-hold" ? "shadow-[0_0_25px_rgba(139,92,246,0.6)]" : ""
           } hover:shadow-lg transition-shadow grid grid-rows-[auto_1fr_auto] overflow-hidden`}
         >
@@ -197,7 +254,7 @@ export function OrderCard({
             </div>
           </CardContent>
 
-          {/* Footer — full-bleed background attached to the bottom */}
+          {/* Footer */}
           <CardFooter className="p-0">
             <div className="bg-muted/50 w-full flex flex-col gap-3 p-4">
               {/* centered time row */}
@@ -216,20 +273,17 @@ export function OrderCard({
 
               {/* actions */}
               {insideDialog ? (
-                // In modal: if completed, hide the Undo button entirely.
-                // If not completed, show a single centered primary action.
                 !isCompleted ? (
                   <div className="flex justify-center">
                     <Button
                       className={`w-full sm:max-w-xs justify-center font-bold ${actionClass}`}
-                      onClick={() => onPrimaryAction(order)}
+                      onClick={handlePrimaryClick}
                     >
                       {actionText}
                     </Button>
                   </div>
                 ) : null
               ) : (
-                // In grid: primary + details (and show Undo for completed)
                 <div className="grid grid-cols-2 gap-3">
                   {isCompleted ? (
                     <Button
@@ -243,7 +297,7 @@ export function OrderCard({
                   ) : (
                     <Button
                       className={`w-full justify-center font-bold ${actionClass}`}
-                      onClick={() => onPrimaryAction(order)}
+                      onClick={handlePrimaryClick}
                     >
                       {actionText}
                     </Button>
@@ -267,7 +321,7 @@ export function OrderCard({
         </Card>
       </div>
 
-      {/* Slide-to-Undo dialog (only used from the completed tab) */}
+      {/* Slide-to-Undo (completed → active) */}
       <Dialog
         open={undoOpen}
         onOpenChange={(o) => (o ? openUndo() : closeUndo())}
@@ -279,16 +333,40 @@ export function OrderCard({
             </DialogTitle>
           </DialogHeader>
 
-          {/* drag handle */}
           <div className="flex items-center justify-center py-3 bg-muted/50">
             <div className="h-1.5 w-12 rounded-full bg-muted-foreground/40" />
           </div>
 
-          <SlideToUndo
+          <SlideToConfirm
             value={slideVal[0]}
             setValue={(p) => setSlideVal([p])}
             onCommit={() => onSlideCommit(slideVal)}
             label={t("Slide right to undo")}
+            icon={<Undo2 className="w-5 h-5 mr-2" />}
+          />
+        </DialogContent>
+      </Dialog>
+
+      {/* Slide-to-Revert (cooking → pending) */}
+      <Dialog
+        open={revertOpen}
+        onOpenChange={(o) => (o ? openRevert() : closeRevert())}
+      >
+        <DialogContent className="sm:max-w-lg p-0 overflow-hidden">
+          <DialogHeader>
+            <DialogTitle className="sr-only">Slide right to revert</DialogTitle>
+          </DialogHeader>
+
+          <div className="flex items-center justify-center py-3 bg-muted/50">
+            <div className="h-1.5 w-12 rounded-full bg-muted-foreground/40" />
+          </div>
+
+          <SlideToConfirm
+            value={slideValRev[0]}
+            setValue={(p) => setSlideValRev([p])}
+            onCommit={() => onSlideRevertCommit(slideValRev)}
+            label="Slide right to revert"
+            icon={<Undo2 className="w-5 h-5 mr-2" />}
           />
         </DialogContent>
       </Dialog>
@@ -296,16 +374,10 @@ export function OrderCard({
   );
 }
 
-/**
- * SlideToUndo
- * - Whole rail is draggable (pointer events on container)
- * - Large pill that drags left→right
- * - Uses shadcn Slider under the hood for keyboard / a11y
- */
-function SlideToUndo({ value, setValue, onCommit, label }) {
+/** Generic slide-to-confirm (used for Undo and Revert) */
+function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
   const railRef = React.useRef(null);
   const [dragging, setDragging] = React.useState(false);
-
   const clamp = (n) => Math.max(0, Math.min(100, n));
 
   const updateFromClientX = (clientX) => {
@@ -321,12 +393,10 @@ function SlideToUndo({ value, setValue, onCommit, label }) {
     e.currentTarget.setPointerCapture?.(e.pointerId);
     updateFromClientX(e.clientX);
   };
-
   const onPointerMove = (e) => {
     if (!dragging) return;
     updateFromClientX(e.clientX);
   };
-
   const onPointerUp = (e) => {
     if (!dragging) return;
     setDragging(false);
@@ -334,7 +404,7 @@ function SlideToUndo({ value, setValue, onCommit, label }) {
     onCommit?.();
   };
 
-  // Keyboard / a11y path via Slider
+  // keyboard / a11y path via hidden slider
   const onSliderChange = (v) => setValue(Array.isArray(v) ? v[0] : v);
   const onSliderCommit = (v) => {
     const val = Array.isArray(v) ? v[0] : v;
@@ -377,10 +447,10 @@ function SlideToUndo({ value, setValue, onCommit, label }) {
           style={{ left: `calc(${Math.min(value, 100)}% + 8px)` }}
           aria-hidden="true"
         >
-          <Undo2 className="w-5 h-5 mr-2" />
+          {icon}
         </div>
 
-        {/* hidden slider for a11y */}
+        {/* hidden slider for keyboard/a11y */}
         <Slider
           value={[value]}
           onValueChange={onSliderChange}

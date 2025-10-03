@@ -1,4 +1,3 @@
-// app/kds-pro/KdsPro.jsx
 "use client";
 
 import React, {
@@ -8,17 +7,18 @@ import React, {
   useCallback,
   useRef,
 } from "react";
-import { Toaster, toast } from "sonner";
+import { toast } from "sonner";
 
-import SignalRBridge from "@/components/SignalRBridge";
+import SignalRBridge from "@/components/SignalRBridge"; // keep if you use it
 
 import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
+import { OrderCard } from "@/components/OrderCard";
 import { Pagination } from "@/components/Pagination";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { EtaDialog } from "@/components/EtaDialog";
 import { FullscreenOrderDialog } from "@/components/FullscreenOrderDialog";
-import { OrderCard } from "@/components/OrderCard";
+
 import { OrderSkeleton } from "@/components/OrderSkeleton";
 import { SidebarSkeleton } from "@/components/SidebarSkeleton";
 
@@ -31,16 +31,17 @@ import {
   listFloorTables,
   readOrdersList,
   readTotalCount,
+  fetchInvoiceBy365Code,
 } from "@/lib/api";
 
-/* i18n */
+/* ------------ i18n ------------ */
 const i18n = {
   en: {
     active_orders: "Active Orders",
     scheduled: "Scheduled",
     history: "History",
     totals: "TOTALS",
-    search_placeholder: "Search orders (Enter = fetch by cart code)…",
+    search_placeholder: "Search orders...",
     start_cooking: "START COOKING",
     complete: "COMPLETE",
     cooking: "COOKING",
@@ -57,76 +58,92 @@ const useT =
   (k) =>
     (i18n[lng] && i18n[lng][k]) || k;
 
-/* helpers */
+/* ------------ helpers ------------ */
 const minutesSince = (ts) => {
   const n = typeof ts === "number" ? ts : Date.parse(ts);
   if (Number.isNaN(n)) return 0;
   return Math.max(0, Math.floor((Date.now() - n) / 60000));
 };
-const calcSubStatus = (o) => {
-  if (o?.status === "completed") return "completed";
-  if (o?.onHold) return "on-hold";
-  if (o?.cooking) return "cooking";
-  if (o?.delayed) return "delayed";
-  if (minutesSince(o.createdAt) > o.eta) return "delayed";
-  return "";
-};
-const statusBorder = (o) => {
-  if (o?.status === "completed") return "border-emerald-500";
-  if (o?.onHold) return "border-violet-500";
-  if (o?.delayed) return "border-red-500";
-  if (o?.cooking) return "border-amber-500";
-  return "border-slate-500";
-};
-const triBoxCls = (state) => {
-  const base =
-    "w-6 h-6 rounded-md border-2 flex items-center justify-center shrink-0 mr-3";
-  if (state === "checked")
-    return `${base} bg-emerald-600 border-emerald-600 text-white`;
-  if (state === "cancelled")
-    return `${base} bg-red-600 border-red-600 text-white`;
-  return `${base} border-slate-500`;
-};
 
 function normalizeOrders(list, page, pageSize) {
   return list.map((raw, idx) => {
-    const id =
+    const header = raw.invoice_header || {};
+    const code365 =
       raw.batch_invoice_number_365 ||
       raw.batch_invoice_code_365 ||
-      raw.batch_invoice_code ||
       raw.invoice_365_code ||
-      raw.shopping_cart_code ||
-      raw.id ||
-      `row-${page}-${idx + 1}`;
+      header.invoice_365_code ||
+      header.batch_invoice_number_365 ||
+      header.batch_invoice_code_365 ||
+      raw.shopping_cart_code;
+
+    const id = code365 || `row-${page}-${idx + 1}`;
 
     const itemsRaw =
       raw.list_invoice_details || raw.list_invoice_lines || raw.items || [];
 
-    const items = itemsRaw.map((it, i) => ({
-      id: it.line_id_365 || it.item_code_365 || `${id}-line-${i + 1}`,
-      name: it.item_name || it.item_code_365 || it.name || "Item",
-      dept: it.item_department_code_365 || it.dept || "General",
-      mods: Array.isArray(it.list_modifiers)
-        ? it.list_modifiers.map(
-            (m) => m.modifier_name || m.modifier_code_365 || m.name
-          )
-        : [],
-      qty: Number(it.line_quantity || it.qty || 1),
-      itemStatus: "none",
-    }));
+    const items = itemsRaw.map((it, i) => {
+      const rawStatus = (
+        it.status_code_365 ||
+        it.status_code ||
+        it.line_status_code_365 ||
+        ""
+      )
+        .toString()
+        .toUpperCase();
+
+      return {
+        id: it.line_id_365 || it.item_code_365 || `${id}-line-${i + 1}`,
+        lineId365: it.line_id_365 || "",
+        name: it.item_name || it.item_code_365 || it.name || "Item",
+        dept: it.item_department_code_365 || it.dept || "General",
+        deptCode: it.item_department_code_365 || "",
+        qty: Number(it.line_quantity || it.qty || 1),
+        mods: Array.isArray(it.list_modifiers)
+          ? it.list_modifiers.map(
+              (m) => m.modifier_name || m.modifier_code_365 || m.name
+            )
+          : [],
+        rawStatus, // INPROC/APPROVED/NEW/...
+        itemStatus: "none",
+      };
+    });
+
+    const anyInproc =
+      items.some((l) => l.rawStatus === "INPROC") ||
+      (raw.status_code_365 || header.status_code_365 || "")
+        .toString()
+        .toUpperCase() === "INPROC";
+
+    const allApproved =
+      items.length > 0 &&
+      items.every((l) =>
+        ["APPROVED", "DONE", "COMPLETED"].includes(l.rawStatus)
+      );
+
+    const status = allApproved
+      ? "completed"
+      : (raw.status_code_365 || header.status_code_365 || "")
+          .toString()
+          .toUpperCase() || "pending";
 
     return {
       id,
       dest:
-        raw.table?.table_name ||
-        raw.table?.table_number ||
+        header.table_name ||
+        header.table_number ||
         raw.agent_code_365 ||
         raw.station_code_365 ||
         "Counter",
-      type: raw.invoice_type || "I",
-      createdAt: raw.invoice_date_utc0 || raw.created_at || Date.now(),
-      status: raw.status_code_365 || "pending",
-      cooking: raw.status_code_365 === "INPROC",
+      type: header.invoice_type || raw.invoice_type || "I",
+      createdAt:
+        header.invoice_date_utc0 ||
+        raw.invoice_date_utc0 ||
+        header.created_at ||
+        raw.created_at ||
+        Date.now(),
+      status,
+      cooking: anyInproc,
       delayed: false,
       onHold: false,
       eta: 10,
@@ -148,26 +165,49 @@ function buildTotalsByDept(orders) {
   return acc;
 }
 
+const statusBorder = (o) => {
+  if (o?.status === "completed") return "border-emerald-500";
+  if (o?.onHold) return "border-violet-500";
+  if (o?.cooking) return "border-amber-500";
+  return "border-slate-500";
+};
+
+const triBoxCls = (state) => {
+  const base =
+    "w-6 h-6 rounded-md border-2 flex items-center justify-center shrink-0 mr-3";
+  if (state === "checked")
+    return `${base} bg-emerald-600 border-emerald-600 text-white`;
+  if (state === "cancelled")
+    return `${base} bg-red-600 border-red-600 text-white`;
+  return `${base} border-slate-500`;
+};
+
+/* ------------ component ------------ */
 function KdsPro() {
   const [language, setLanguage] = useState("en");
   const t = useT(language);
 
+  // data buckets (current page only — API is paged)
   const [orders, setOrders] = useState([]);
   const [completed, setCompleted] = useState([]);
   const [scheduled, setScheduled] = useState([]);
 
+  // filters
   const [departments, setDepartments] = useState(["All"]);
   const [selectedDepts, setSelectedDepts] = useState(["All"]);
 
-  const [activeTab, setActiveTab] = useState("active");
-  const [searchTerm, setSearchTerm] = useState("");
+  // UI
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [currentTime, setCurrentTime] = useState("");
+  const [activeTab, setActiveTab] = useState("active");
+  const [searchTerm, setSearchTerm] = useState("");
 
+  // paging (real, from API)
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(24);
   const [totalPages, setTotalPages] = useState(1);
 
+  // dialogs
   const [etaDialog, setEtaDialog] = useState({ open: false, orderId: null });
   const [orderDialog, setOrderDialog] = useState({
     open: false,
@@ -175,6 +215,7 @@ function KdsPro() {
   });
   const [settingsDialog, setSettingsDialog] = useState(false);
 
+  // loading/safety
   const [isLoading, setIsLoading] = useState(false);
   const abortRef = useRef(null);
   const requestSeq = useRef(0);
@@ -188,19 +229,20 @@ function KdsPro() {
     return () => clearInterval(i);
   }, []);
 
+  /* ---------- fetch one page (uses API total_count) ---------- */
   const fetchPage = useCallback(async () => {
     const mySeq = ++requestSeq.current;
     try {
       abortRef.current?.abort?.();
     } catch {}
     abortRef.current = new AbortController();
-
     const deptFilter = selectedDepts.includes("All")
       ? ""
       : selectedDepts.join(",");
-    setIsLoading(true);
 
+    setIsLoading(true);
     try {
+      // 1) total count for pagination
       const countPayload = await listBatchOrders({
         pageNumber: 1,
         pageSize: 1,
@@ -208,11 +250,12 @@ function KdsPro() {
         itemDepartmentSelection: deptFilter,
       });
       if (mySeq !== requestSeq.current) return;
-      const total = Math.max(1, Number(readTotalCount(countPayload)) || 1);
+      const total = Math.max(0, Number(readTotalCount(countPayload)) || 0);
       const pages = Math.max(1, Math.ceil(total / itemsPerPage));
       setTotalPages(pages);
       if (currentPage > pages) setCurrentPage(pages);
 
+      // 2) fetch this page
       const dataPayload = await listBatchOrders({
         pageNumber: currentPage,
         pageSize: itemsPerPage,
@@ -227,6 +270,7 @@ function KdsPro() {
       setOrders(normalized.filter((o) => o.status !== "completed"));
       setCompleted(normalized.filter((o) => o.status === "completed"));
 
+      // departments for filters
       const deptSet = new Set(["All"]);
       normalized.forEach((o) =>
         (o.items || []).forEach((it) => deptSet.add(it.dept || "General"))
@@ -249,66 +293,29 @@ function KdsPro() {
     };
   }, [fetchPage]);
 
+  // when filters/tabs change → reset to page 1 then fetch
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedDepts.join(","), activeTab]);
 
+  // optional “prove auth / warm cache” calls
   useEffect(() => {
-    listBatchOrderHeaders({ pageNumber: 1, pageSize: 10, onlyCounted: "N" })
-      .then((payload) => console.log("[KDS] Headers sample:", payload))
-      .catch(() => {});
-  }, []);
-  useEffect(() => {
-    listTableSettings({ pageNumber: 1, pageSize: 20, onlyCounted: "N" })
-      .then((payload) => console.log("[KDS] Table settings sample:", payload))
-      .catch(() => {});
+    listBatchOrderHeaders({
+      pageNumber: 1,
+      pageSize: 10,
+      onlyCounted: "N",
+    }).catch(() => {});
   }, []);
   useEffect(() => {
-    listFloorTables({})
-      .then((payload) => console.log("[KDS] Floor tables sample:", payload))
-      .catch(() => {});
+    listTableSettings({ pageNumber: 1, pageSize: 20, onlyCounted: "N" }).catch(
+      () => {}
+    );
+  }, []);
+  useEffect(() => {
+    listFloorTables({}).catch(() => {});
   }, []);
 
-  const onSearchEnter = useCallback(async (term) => {
-    if (!term) return;
-    try {
-      setIsLoading(true);
-      const payload = await getBatchOrderByShoppingCart({
-        shopping_cart_code: term,
-        by_365_code: true,
-      });
-      const list = Array.isArray(payload)
-        ? payload
-        : readOrdersList(payload) ||
-          (payload && typeof payload === "object" ? [payload] : []);
-      const normalized = normalizeOrders(list, 1, list.length || 1);
-      if (!normalized.length) {
-        toast("No order found for that shopping cart code");
-        return;
-      }
-
-      setOrders(normalized.filter((o) => o.status !== "completed"));
-      setCompleted(normalized.filter((o) => o.status === "completed"));
-
-      const deptSet = new Set(["All"]);
-      normalized.forEach((o) =>
-        (o.items || []).forEach((it) => deptSet.add(it.dept || "General"))
-      );
-      setDepartments(Array.from(deptSet));
-      setOrderDialog({ open: true, orderId: normalized[0].id });
-    } catch (e) {
-      console.error(e);
-      toast.error("Failed to fetch order by shopping cart code");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  const handleOrderUpdate = useCallback(() => {
-    toast.info("Live update received", { description: "Refreshing orders…" });
-    fetchPage();
-  }, [fetchPage]);
-
+  /* ---------- view model (filters apply within current page) ---------- */
   const allForTab = useMemo(() => {
     if (activeTab === "completed") return completed;
     if (activeTab === "scheduled") return scheduled;
@@ -338,27 +345,182 @@ function KdsPro() {
   }, [allForTab, searchTerm, selectedDepts]);
 
   const totalsByDept = useMemo(() => buildTotalsByDept(filtered), [filtered]);
-  const counts = {
-    active: orders.length,
-    scheduled: scheduled.length,
-    completed: completed.length,
+
+  /* ---------- helpers for writes ---------- */
+  const getBatchCode365 = (o) => {
+    const h = o._raw?.invoice_header || {};
+    return (
+      o._raw?.batch_invoice_number_365 ||
+      o._raw?.batch_invoice_code_365 ||
+      o._raw?.invoice_365_code ||
+      h.invoice_365_code ||
+      h.batch_invoice_number_365 ||
+      h.batch_invoice_code_365 ||
+      o._raw?.shopping_cart_code ||
+      o.id
+    );
   };
 
-  const actionLabelAndClass = useCallback(
-    (o) => {
-      if ((o.items || []).every((i) => i.itemStatus === "checked"))
-        return {
-          label: t("complete"),
-          cls: "bg-emerald-600 hover:bg-emerald-700",
-        };
-      if (o.cooking)
-        return { label: t("cooking"), cls: "bg-amber-500 hover:bg-amber-600" };
-      return {
-        label: t("start_cooking"),
-        cls: "bg-blue-600 hover:bg-blue-700",
-      };
+  const buildRowsPerLine = (order, nextStatus) => {
+    const batch = getBatchCode365(order);
+    const rows = (order.items || []).map((it) => ({
+      batch_invoice_number_365: String(batch),
+      batch_invoice_code_365: String(batch),
+      line_id_365: it.lineId365 || "",
+      status_code_365: nextStatus, // "INPROC", "APPROVED", or "NEW"
+      item_department_code_365: it.deptCode || "",
+      time_to_complete: 0,
+    }));
+    return rows.length
+      ? rows
+      : [
+          {
+            batch_invoice_number_365: String(batch),
+            batch_invoice_code_365: String(batch),
+            line_id_365: "",
+            status_code_365: nextStatus,
+            item_department_code_365: "",
+            time_to_complete: 0,
+          },
+        ];
+  };
+
+  const verifyPersisted = async (order) => {
+    try {
+      const batch = getBatchCode365(order);
+      if (!batch) return false;
+      const fresh = await fetchInvoiceBy365Code(batch);
+      if (!fresh) return false;
+      const items =
+        fresh.list_invoice_details ||
+        fresh.list_invoice_lines ||
+        fresh.items ||
+        [];
+      const anyInproc = items.some(
+        (l) =>
+          String(l.status_code_365 || l.status_code || "").toUpperCase() ===
+          "INPROC"
+      );
+      const allApproved =
+        items.length > 0 &&
+        items.every((l) =>
+          ["APPROVED", "DONE", "COMPLETED"].includes(
+            String(l.status_code_365 || l.status_code || "").toUpperCase()
+          )
+        );
+      const noneInproc = items.every(
+        (l) =>
+          String(l.status_code_365 || l.status_code || "").toUpperCase() !==
+          "INPROC"
+      );
+      return { anyInproc, allApproved, noneInproc };
+    } catch {
+      return false;
+    }
+  };
+
+  /* ---------- actions (same as before) ---------- */
+  const onPrimaryAction = useCallback(
+    async (order) => {
+      const isComplete = (order.items || []).every(
+        (i) => i.itemStatus === "checked"
+      );
+      const nextStatus = isComplete ? "APPROVED" : "INPROC";
+      const rows = buildRowsPerLine(order, nextStatus);
+
+      // optimistic
+      const rollback = JSON.parse(JSON.stringify(orders));
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id !== order.id
+            ? o
+            : {
+                ...o,
+                status: isComplete ? "completed" : "active",
+                cooking: !isComplete,
+              }
+        )
+      );
+
+      try {
+        await bulkChangeBatchOrderStatus(rows);
+        const persisted = await verifyPersisted(order);
+        if (
+          !persisted ||
+          (nextStatus === "INPROC" && !persisted.anyInproc) ||
+          (nextStatus === "APPROVED" && !persisted.allApproved)
+        ) {
+          throw new Error("Verify failed");
+        }
+        toast.success(
+          isComplete
+            ? `Order #${order.id} completed`
+            : `Order #${order.id} ${useT("en")("started_cooking")}`
+        );
+        await fetchPage();
+      } catch (e) {
+        console.error(e);
+        setOrders(rollback);
+        toast.error("Status update did not persist in database");
+      }
     },
-    [t]
+    [orders, fetchPage]
+  );
+
+  const onUndoAction = useCallback(
+    async (order) => {
+      const rows = buildRowsPerLine(order, "INPROC");
+      const rollbackCompleted = JSON.parse(JSON.stringify(completed));
+      const rollbackOrders = JSON.parse(JSON.stringify(orders));
+
+      setCompleted((prev) => prev.filter((o) => o.id !== order.id));
+      setOrders((prev) => [
+        { ...order, status: "active", cooking: true },
+        ...prev,
+      ]);
+
+      try {
+        await bulkChangeBatchOrderStatus(rows);
+        const persisted = await verifyPersisted(order);
+        if (!persisted || !persisted.anyInproc)
+          throw new Error("Undo verify failed");
+        toast(`Order #${order.id}: ${useT("en")("undone_to_active")}`);
+        await fetchPage();
+      } catch (e) {
+        console.error(e);
+        setCompleted(rollbackCompleted);
+        setOrders(rollbackOrders);
+        toast.error("Undo failed to persist in database");
+      }
+    },
+    [orders, completed, fetchPage]
+  );
+
+  const onRevertAction = useCallback(
+    async (order) => {
+      const rows = buildRowsPerLine(order, "NEW"); // adjust status if needed
+      const rollbackOrders = JSON.parse(JSON.stringify(orders));
+
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id !== order.id ? o : { ...o, status: "pending", cooking: false }
+        )
+      );
+
+      try {
+        await bulkChangeBatchOrderStatus(rows);
+        const persisted = await verifyPersisted(order);
+        if (!persisted || !persisted.noneInproc)
+          throw new Error("Revert verify failed");
+        toast.success(`Order #${order.id} reverted to not started`);
+        await fetchPage();
+      } catch (e) {
+        console.error(e);
+        setOrders(rollbackOrders);
+        toast.error("Revert did not persist in database");
+      }
+    },
+    [orders, fetchPage]
   );
 
   const toggleItemState = useCallback(
@@ -384,74 +546,6 @@ function KdsPro() {
     [activeTab]
   );
 
-  const onPrimaryAction = useCallback(
-    async (order) => {
-      try {
-        const code365 =
-          order._raw?.batch_invoice_number_365 ||
-          order._raw?.batch_invoice_code_365 ||
-          order.id;
-
-        if ((order.items || []).every((i) => i.itemStatus === "checked")) {
-          await bulkChangeBatchOrderStatus([
-            {
-              batch_invoice_number_365: String(code365),
-              line_id_365: "",
-              status_code_365: "APPROVED",
-              item_department_code_365: "",
-              time_to_complete: 0,
-            },
-          ]);
-          toast.success(`Order #${order.id} completed`);
-          await fetchPage();
-          return;
-        }
-
-        await bulkChangeBatchOrderStatus([
-          {
-            batch_invoice_number_365: String(code365),
-            line_id_365: "",
-            status_code_365: "INPROC",
-            item_department_code_365: "",
-            time_to_complete: 0,
-          },
-        ]);
-        toast.info(`Order #${order.id} ${t("started_cooking")}`);
-        await fetchPage();
-      } catch (e) {
-        console.error(e);
-        toast.error("Failed to update order status");
-      }
-    },
-    [fetchPage, t]
-  );
-
-  const onUndoAction = useCallback(
-    async (order) => {
-      try {
-        const code365 =
-          order._raw?.batch_invoice_number_365 ||
-          order._raw?.batch_invoice_code_365 ||
-          order.id;
-        await bulkChangeBatchOrderStatus([
-          {
-            batch_invoice_number_365: String(code365),
-            line_id_365: "",
-            status_code_365: "INPROC",
-            item_department_code_365: "",
-            time_to_complete: 0,
-          },
-        ]);
-        toast(`Order #${order.id}: ${t("undone_to_active")}`);
-        await fetchPage();
-      } catch (e) {
-        console.error(e);
-        toast.error("Failed to undo completion");
-      }
-    },
-    [fetchPage, t]
-  );
-
   const toggleDept = (dept) => {
     if (dept === "All") return setSelectedDepts(["All"]);
     let next = selectedDepts.filter((d) => d !== "All");
@@ -461,23 +555,45 @@ function KdsPro() {
     setSelectedDepts(next);
   };
 
+  const actionLabelAndClass = useCallback((o) => {
+    if ((o.items || []).every((i) => i.itemStatus === "checked"))
+      return {
+        label: useT("en")("complete"),
+        cls: "bg-emerald-600 hover:bg-emerald-700",
+      };
+    if (o.cooking)
+      return {
+        label: useT("en")("cooking"),
+        cls: "bg-amber-500 hover:bg-amber-600",
+      };
+    return {
+      label: useT("en")("start_cooking"),
+      cls: "bg-blue-600 hover:bg-blue-700",
+    };
+  }, []);
+
+  const calcSubStatus = (o) => {
+    if (o.status === "completed") return "completed";
+    if (o.cooking) return "cooking";
+    if (minutesSince(o.createdAt) > o.eta) return "delayed";
+    return "";
+  };
+
   const headerTabs = [
     { key: "active", label: t("active_orders") },
     { key: "scheduled", label: t("scheduled") },
     { key: "completed", label: t("history") },
   ];
 
+  const counts = {
+    active: orders.length,
+    scheduled: scheduled.length,
+    completed: completed.length,
+  };
+
   return (
     <div className="h-dvh flex flex-col bg-background text-foreground transition-colors">
-      <SignalRBridge
-        onOrderUpdate={() => {
-          toast.info("Live update received", {
-            description: "Refreshing orders…",
-          });
-          fetchPage();
-        }}
-      />
-      <Toaster richColors position="top-right" />
+      <SignalRBridge onOrderUpdate={fetchPage} />
 
       <Header
         currentTime={currentTime}
@@ -487,7 +603,6 @@ function KdsPro() {
         counts={counts}
         searchTerm={searchTerm}
         setSearchTerm={setSearchTerm}
-        onSearchEnter={onSearchEnter}
         t={t}
         departments={departments}
         selectedDepts={selectedDepts}
@@ -495,8 +610,8 @@ function KdsPro() {
         setSettingsDialog={setSettingsDialog}
       />
 
-      {/* IMPORTANT: min-h-0 enables inner scrollers (sidebar + content) */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* Sidebar or its skeleton */}
         {isLoading ? (
           <SidebarSkeleton
             sidebarOpen={sidebarOpen}
@@ -512,6 +627,7 @@ function KdsPro() {
           />
         )}
 
+        {/* Main list */}
         <section className="flex-1 min-h-0 p-4 overflow-y-auto">
           <div className="max-w-[1800px] mx-auto">
             {isLoading ? (
@@ -528,36 +644,18 @@ function KdsPro() {
               <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                 {filtered.map((o, idx) => (
                   <OrderCard
-                    key={`${o.id}-${idx}`}
+                    key={`${o.id}-${o.createdAt}-${o.dest}-${idx}`}
                     order={o}
                     toggleItemState={toggleItemState}
                     onPrimaryAction={onPrimaryAction}
                     onUndoAction={onUndoAction}
+                    onRevertAction={onRevertAction}
                     setEtaDialog={setEtaDialog}
                     setOrderDialog={setOrderDialog}
                     t={t}
                     timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
                     calcSubStatus={calcSubStatus}
-                    actionLabelAndClass={(ord) => {
-                      if (
-                        (ord.items || []).every(
-                          (i) => i.itemStatus === "checked"
-                        )
-                      )
-                        return {
-                          label: t("complete"),
-                          cls: "bg-emerald-600 hover:bg-emerald-700",
-                        };
-                      if (ord.cooking)
-                        return {
-                          label: t("cooking"),
-                          cls: "bg-amber-500 hover:bg-amber-600",
-                        };
-                      return {
-                        label: t("start_cooking"),
-                        cls: "bg-blue-600 hover:bg-blue-700",
-                      };
-                    }}
+                    actionLabelAndClass={actionLabelAndClass}
                     statusBorder={statusBorder}
                     triBoxCls={triBoxCls}
                     selectedDepts={selectedDepts}
@@ -569,6 +667,7 @@ function KdsPro() {
         </section>
       </div>
 
+      {/* REAL pagination from API total */}
       {!isLoading && totalPages > 1 && (
         <Pagination
           totalPages={totalPages}
@@ -579,6 +678,7 @@ function KdsPro() {
         />
       )}
 
+      {/* Dialogs */}
       <EtaDialog
         open={etaDialog.open}
         onOpenChange={(open) =>
@@ -600,26 +700,13 @@ function KdsPro() {
         completed={completed}
         toggleItemState={toggleItemState}
         onPrimaryAction={onPrimaryAction}
+        onUndoAction={onUndoAction}
+        onRevertAction={onRevertAction}
         setEtaDialog={setEtaDialog}
         t={t}
         timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
         calcSubStatus={calcSubStatus}
-        actionLabelAndClass={(o) => {
-          if ((o.items || []).every((i) => i.itemStatus === "checked"))
-            return {
-              label: t("complete"),
-              cls: "bg-emerald-600 hover:bg-emerald-700",
-            };
-          if (o.cooking)
-            return {
-              label: t("cooking"),
-              cls: "bg-amber-500 hover:bg-amber-600",
-            };
-          return {
-            label: t("start_cooking"),
-            cls: "bg-blue-600 hover:bg-blue-700",
-          };
-        }}
+        actionLabelAndClass={actionLabelAndClass}
         statusBorder={statusBorder}
         triBoxCls={triBoxCls}
         selectedDepts={selectedDepts}

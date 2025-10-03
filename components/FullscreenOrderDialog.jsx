@@ -1,4 +1,3 @@
-// app/kds-pro/components/FullscreenOrderDialog.jsx
 "use client";
 
 import React, { useMemo } from "react";
@@ -18,6 +17,8 @@ export function FullscreenOrderDialog({
   completed,
   toggleItemState,
   onPrimaryAction,
+  onUndoAction, // pass through
+  onRevertAction, // NEW: pass through
   setEtaDialog,
   t,
   timeElapsedMin,
@@ -46,6 +47,8 @@ export function FullscreenOrderDialog({
               order={fullOrder}
               toggleItemState={toggleItemState}
               onPrimaryAction={onPrimaryAction}
+              onUndoAction={onUndoAction}
+              onRevertAction={onRevertAction}
               setEtaDialog={setEtaDialog}
               setOrderDialog={() => {}}
               t={t}
