@@ -1,3 +1,4 @@
+// app/kds-pro/KdsPro.jsx
 "use client";
 
 import React, {
@@ -9,7 +10,7 @@ import React, {
 } from "react";
 import { toast } from "sonner";
 
-import SignalRBridge from "@/components/SignalRBridge"; // keep if you use it
+import SignalRBridge from "@/components/SignalRBridge";
 
 import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
@@ -25,7 +26,6 @@ import { SidebarSkeleton } from "@/components/SidebarSkeleton";
 import {
   listBatchOrders,
   listBatchOrderHeaders,
-  getBatchOrderByShoppingCart,
   bulkChangeBatchOrderStatus,
   listTableSettings,
   listFloorTables,
@@ -294,9 +294,10 @@ function KdsPro() {
   }, [fetchPage]);
 
   // when filters/tabs change → reset to page 1 then fetch
+  const selectedKey = useMemo(() => selectedDepts.join("|"), [selectedDepts]);
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedDepts.join(","), activeTab]);
+  }, [selectedKey, activeTab]);
 
   // optional “prove auth / warm cache” calls
   useEffect(() => {
@@ -347,7 +348,7 @@ function KdsPro() {
   const totalsByDept = useMemo(() => buildTotalsByDept(filtered), [filtered]);
 
   /* ---------- helpers for writes ---------- */
-  const getBatchCode365 = (o) => {
+  const getBatchCode365 = useCallback((o) => {
     const h = o._raw?.invoice_header || {};
     return (
       o._raw?.batch_invoice_number_365 ||
@@ -359,67 +360,73 @@ function KdsPro() {
       o._raw?.shopping_cart_code ||
       o.id
     );
-  };
+  }, []);
 
-  const buildRowsPerLine = (order, nextStatus) => {
-    const batch = getBatchCode365(order);
-    const rows = (order.items || []).map((it) => ({
-      batch_invoice_number_365: String(batch),
-      batch_invoice_code_365: String(batch),
-      line_id_365: it.lineId365 || "",
-      status_code_365: nextStatus, // "INPROC", "APPROVED", or "NEW"
-      item_department_code_365: it.deptCode || "",
-      time_to_complete: 0,
-    }));
-    return rows.length
-      ? rows
-      : [
-          {
-            batch_invoice_number_365: String(batch),
-            batch_invoice_code_365: String(batch),
-            line_id_365: "",
-            status_code_365: nextStatus,
-            item_department_code_365: "",
-            time_to_complete: 0,
-          },
-        ];
-  };
-
-  const verifyPersisted = async (order) => {
-    try {
+  const buildRowsPerLine = useCallback(
+    (order, nextStatus) => {
       const batch = getBatchCode365(order);
-      if (!batch) return false;
-      const fresh = await fetchInvoiceBy365Code(batch);
-      if (!fresh) return false;
-      const items =
-        fresh.list_invoice_details ||
-        fresh.list_invoice_lines ||
-        fresh.items ||
-        [];
-      const anyInproc = items.some(
-        (l) =>
-          String(l.status_code_365 || l.status_code || "").toUpperCase() ===
-          "INPROC"
-      );
-      const allApproved =
-        items.length > 0 &&
-        items.every((l) =>
-          ["APPROVED", "DONE", "COMPLETED"].includes(
-            String(l.status_code_365 || l.status_code || "").toUpperCase()
-          )
-        );
-      const noneInproc = items.every(
-        (l) =>
-          String(l.status_code_365 || l.status_code || "").toUpperCase() !==
-          "INPROC"
-      );
-      return { anyInproc, allApproved, noneInproc };
-    } catch {
-      return false;
-    }
-  };
+      const rows = (order.items || []).map((it) => ({
+        batch_invoice_number_365: String(batch),
+        batch_invoice_code_365: String(batch),
+        line_id_365: it.lineId365 || "",
+        status_code_365: nextStatus, // "INPROC", "APPROVED", or "NEW"
+        item_department_code_365: it.deptCode || "",
+        time_to_complete: 0,
+      }));
+      return rows.length
+        ? rows
+        : [
+            {
+              batch_invoice_number_365: String(batch),
+              batch_invoice_code_365: String(batch),
+              line_id_365: "",
+              status_code_365: nextStatus,
+              item_department_code_365: "",
+              time_to_complete: 0,
+            },
+          ];
+    },
+    [getBatchCode365]
+  );
 
-  /* ---------- actions (same as before) ---------- */
+  const verifyPersisted = useCallback(
+    async (order) => {
+      try {
+        const batch = getBatchCode365(order);
+        if (!batch) return false;
+        const fresh = await fetchInvoiceBy365Code(batch);
+        if (!fresh) return false;
+        const items =
+          fresh.list_invoice_details ||
+          fresh.list_invoice_lines ||
+          fresh.items ||
+          [];
+        const anyInproc = items.some(
+          (l) =>
+            String(l.status_code_365 || l.status_code || "").toUpperCase() ===
+            "INPROC"
+        );
+        const allApproved =
+          items.length > 0 &&
+          items.every((l) =>
+            ["APPROVED", "DONE", "COMPLETED"].includes(
+              String(l.status_code_365 || l.status_code || "").toUpperCase()
+            )
+          );
+        const noneInproc = items.every(
+          (l) =>
+            String(l.status_code_365 || l.status_code || "").toUpperCase() !==
+            "INPROC"
+        );
+        return { anyInproc, allApproved, noneInproc };
+      } catch {
+        return false;
+      }
+    },
+    [getBatchCode365]
+  );
+
+  /* ---------- actions ---------- */
   const onPrimaryAction = useCallback(
     async (order) => {
       const isComplete = (order.items || []).every(
@@ -455,7 +462,7 @@ function KdsPro() {
         toast.success(
           isComplete
             ? `Order #${order.id} completed`
-            : `Order #${order.id} ${useT("en")("started_cooking")}`
+            : `Order #${order.id} ${t("started_cooking")}`
         );
         await fetchPage();
       } catch (e) {
@@ -464,7 +471,7 @@ function KdsPro() {
         toast.error("Status update did not persist in database");
       }
     },
-    [orders, fetchPage]
+    [orders, buildRowsPerLine, verifyPersisted, t, fetchPage]
   );
 
   const onUndoAction = useCallback(
@@ -484,7 +491,7 @@ function KdsPro() {
         const persisted = await verifyPersisted(order);
         if (!persisted || !persisted.anyInproc)
           throw new Error("Undo verify failed");
-        toast(`Order #${order.id}: ${useT("en")("undone_to_active")}`);
+        toast(`Order #${order.id}: ${t("undone_to_active")}`);
         await fetchPage();
       } catch (e) {
         console.error(e);
@@ -493,7 +500,7 @@ function KdsPro() {
         toast.error("Undo failed to persist in database");
       }
     },
-    [orders, completed, fetchPage]
+    [orders, completed, buildRowsPerLine, verifyPersisted, t, fetchPage]
   );
 
   const onRevertAction = useCallback(
@@ -520,7 +527,7 @@ function KdsPro() {
         toast.error("Revert did not persist in database");
       }
     },
-    [orders, fetchPage]
+    [orders, buildRowsPerLine, verifyPersisted, fetchPage]
   );
 
   const toggleItemState = useCallback(
@@ -555,22 +562,25 @@ function KdsPro() {
     setSelectedDepts(next);
   };
 
-  const actionLabelAndClass = useCallback((o) => {
-    if ((o.items || []).every((i) => i.itemStatus === "checked"))
+  const actionLabelAndClass = useCallback(
+    (o) => {
+      if ((o.items || []).every((i) => i.itemStatus === "checked"))
+        return {
+          label: t("complete"),
+          cls: "bg-emerald-600 hover:bg-emerald-700",
+        };
+      if (o.cooking)
+        return {
+          label: t("cooking"),
+          cls: "bg-amber-500 hover:bg-amber-600",
+        };
       return {
-        label: useT("en")("complete"),
-        cls: "bg-emerald-600 hover:bg-emerald-700",
+        label: t("start_cooking"),
+        cls: "bg-blue-600 hover:bg-blue-700",
       };
-    if (o.cooking)
-      return {
-        label: useT("en")("cooking"),
-        cls: "bg-amber-500 hover:bg-amber-600",
-      };
-    return {
-      label: useT("en")("start_cooking"),
-      cls: "bg-blue-600 hover:bg-blue-700",
-    };
-  }, []);
+    },
+    [t]
+  );
 
   const calcSubStatus = (o) => {
     if (o.status === "completed") return "completed";
