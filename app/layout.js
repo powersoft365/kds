@@ -7,7 +7,7 @@ import { Toaster } from "sonner";
 export default function RootLayout({ children }) {
   return (
     <html suppressHydrationWarning lang="en">
-      <body className="min-h-dvh bg-background text-foreground antialiased">
+      <body className="min-h-dvh select-none bg-background text-foreground antialiased">
         {/* ThemeProvider uses class switching so Tailwind `dark:` works */}
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           {children}

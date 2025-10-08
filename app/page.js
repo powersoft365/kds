@@ -1,4 +1,3 @@
-// app/kds-pro/KdsPro.jsx
 "use client";
 
 import React, {
@@ -7,8 +6,27 @@ import React, {
   useState,
   useCallback,
   useRef,
+  memo,
 } from "react";
 import { toast } from "sonner";
+import {
+  DndContext,
+  closestCorners,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragOverlay,
+  MeasuringStrategy,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  rectSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import SignalRBridge from "@/components/SignalRBridge";
 
@@ -33,6 +51,35 @@ import {
   readTotalCount,
   fetchInvoiceBy365Code,
 } from "@/lib/api";
+
+/* ------------ Sortable Order Card Wrapper (memoized) ------------ */
+const SortableOrderCard = memo(function SortableOrderCard({ order, ...props }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: order.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    willChange: isDragging ? "transform" : undefined,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="touch-none">
+      <OrderCard
+        order={order}
+        isDragging={isDragging}
+        dragHandleProps={{ ...attributes, ...listeners }}
+        {...props}
+      />
+    </div>
+  );
+});
 
 /* ------------ i18n ------------ */
 const i18n = {
@@ -104,7 +151,7 @@ function normalizeOrders(list, page, pageSize) {
               (m) => m.modifier_name || m.modifier_code_365 || m.name
             )
           : [],
-        rawStatus, // INPROC/APPROVED/NEW/...
+        rawStatus,
         itemStatus: "none",
       };
     });
@@ -220,6 +267,20 @@ function KdsPro() {
   const abortRef = useRef(null);
   const requestSeq = useRef(0);
 
+  // Drag and drop state
+  const [activeId, setActiveId] = useState(null);
+  const [activeOrder, setActiveOrder] = useState(null);
+
+  // Sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 8 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+
   useEffect(() => {
     const i = setInterval(() => {
       try {
@@ -242,7 +303,7 @@ function KdsPro() {
 
     setIsLoading(true);
     try {
-      // 1) total count for pagination
+      // 1) total count
       const countPayload = await listBatchOrders({
         pageNumber: 1,
         pageSize: 1,
@@ -250,12 +311,12 @@ function KdsPro() {
         itemDepartmentSelection: deptFilter,
       });
       if (mySeq !== requestSeq.current) return;
-      const total = Math.max(0, Number(readTotalCount(countPayload)) || 0);
+      const total = Math.max(0, Number(readTotalCount(countPayload))) || 0;
       const pages = Math.max(1, Math.ceil(total / itemsPerPage));
       setTotalPages(pages);
       if (currentPage > pages) setCurrentPage(pages);
 
-      // 2) fetch this page
+      // 2) this page
       const dataPayload = await listBatchOrders({
         pageNumber: currentPage,
         pageSize: itemsPerPage,
@@ -270,7 +331,7 @@ function KdsPro() {
       setOrders(normalized.filter((o) => o.status !== "completed"));
       setCompleted(normalized.filter((o) => o.status === "completed"));
 
-      // departments for filters
+      // depts
       const deptSet = new Set(["All"]);
       normalized.forEach((o) =>
         (o.items || []).forEach((it) => deptSet.add(it.dept || "General"))
@@ -293,13 +354,13 @@ function KdsPro() {
     };
   }, [fetchPage]);
 
-  // when filters/tabs change → reset to page 1 then fetch
+  // when filters/tabs change → reset to page 1
   const selectedKey = useMemo(() => selectedDepts.join("|"), [selectedDepts]);
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedKey, activeTab]);
 
-  // optional “prove auth / warm cache” calls
+  // warm-up calls
   useEffect(() => {
     listBatchOrderHeaders({
       pageNumber: 1,
@@ -316,7 +377,7 @@ function KdsPro() {
     listFloorTables({}).catch(() => {});
   }, []);
 
-  /* ---------- view model (filters apply within current page) ---------- */
+  /* ---------- view model ---------- */
   const allForTab = useMemo(() => {
     if (activeTab === "completed") return completed;
     if (activeTab === "scheduled") return scheduled;
@@ -401,22 +462,19 @@ function KdsPro() {
           fresh.list_invoice_lines ||
           fresh.items ||
           [];
+        const toUpper = (v) => String(v || "").toUpperCase();
         const anyInproc = items.some(
-          (l) =>
-            String(l.status_code_365 || l.status_code || "").toUpperCase() ===
-            "INPROC"
+          (l) => toUpper(l.status_code_365 || l.status_code) === "INPROC"
         );
         const allApproved =
           items.length > 0 &&
           items.every((l) =>
             ["APPROVED", "DONE", "COMPLETED"].includes(
-              String(l.status_code_365 || l.status_code || "").toUpperCase()
+              toUpper(l.status_code_365 || l.status_code)
             )
           );
         const noneInproc = items.every(
-          (l) =>
-            String(l.status_code_365 || l.status_code || "").toUpperCase() !==
-            "INPROC"
+          (l) => toUpper(l.status_code_365 || l.status_code) !== "INPROC"
         );
         return { anyInproc, allApproved, noneInproc };
       } catch {
@@ -426,7 +484,37 @@ function KdsPro() {
     [getBatchCode365]
   );
 
-  /* ---------- actions ---------- */
+  // Convenience: global SignalR API getter + publisher
+  const SR = () => (typeof window !== "undefined" ? window.SignalR : null);
+  const currentDeptForSend = () =>
+    selectedDepts.includes("All") ? undefined : selectedDepts[0];
+
+  const publish = async (fn, ...args) => {
+    try {
+      const api = SR();
+      if (!api || !api[fn]) return;
+      // append dept as last param if helper supports it
+      const dept = currentDeptForSend();
+      if (
+        [
+          "send",
+          "startCooking",
+          "completeOrder",
+          "revertOrder",
+          "toggleItem",
+          "setEta",
+        ].includes(fn)
+      ) {
+        args.push(dept);
+      }
+      await api[fn](...args);
+    } catch (e) {
+      console.error("[SignalR publish error]", e);
+      toast.error(`SignalR send failed: ${e?.message || "unknown error"}`);
+    }
+  };
+
+  /* ---------- actions (with SignalR sends) ---------- */
   const onPrimaryAction = useCallback(
     async (order) => {
       const isComplete = (order.items || []).every(
@@ -435,19 +523,28 @@ function KdsPro() {
       const nextStatus = isComplete ? "APPROVED" : "INPROC";
       const rows = buildRowsPerLine(order, nextStatus);
 
-      // optimistic
+      // Optimistic UI update
       const rollback = JSON.parse(JSON.stringify(orders));
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id !== order.id
-            ? o
-            : {
-                ...o,
-                status: isComplete ? "completed" : "active",
-                cooking: !isComplete,
-              }
-        )
+      const updatedOrders = orders.map((o) =>
+        o.id !== order.id
+          ? o
+          : {
+              ...o,
+              status: isComplete ? "completed" : "active",
+              cooking: !isComplete,
+              cookingStartedAt: !isComplete ? Date.now() : o.cookingStartedAt,
+            }
       );
+
+      if (isComplete) {
+        setOrders(updatedOrders.filter((o) => o.id !== order.id));
+        setCompleted((prev) => [
+          { ...order, status: "completed", cooking: false },
+          ...prev,
+        ]);
+      } else {
+        setOrders(updatedOrders);
+      }
 
       try {
         await bulkChangeBatchOrderStatus(rows);
@@ -459,19 +556,29 @@ function KdsPro() {
         ) {
           throw new Error("Verify failed");
         }
-        toast.success(
-          isComplete
-            ? `Order #${order.id} completed`
-            : `Order #${order.id} ${t("started_cooking")}`
-        );
-        await fetchPage();
+
+        if (isComplete) {
+          toast.success(`Order #${order.id} completed`);
+          await publish("completeOrder", order); // SignalR send with creds
+        } else {
+          toast.success(`Order #${order.id} ${t("started_cooking")}`);
+          await publish("startCooking", {
+            ...order,
+            cookingStartedAt: Date.now(),
+          });
+        }
       } catch (e) {
         console.error(e);
+        // Rollback
         setOrders(rollback);
+        if (isComplete) {
+          setCompleted((prev) => prev.filter((o) => o.id !== order.id));
+          setOrders((prev) => [...prev, order]);
+        }
         toast.error("Status update did not persist in database");
       }
     },
-    [orders, buildRowsPerLine, verifyPersisted, t, fetchPage]
+    [orders, buildRowsPerLine, verifyPersisted, t, selectedDepts]
   );
 
   const onUndoAction = useCallback(
@@ -480,9 +587,15 @@ function KdsPro() {
       const rollbackCompleted = JSON.parse(JSON.stringify(completed));
       const rollbackOrders = JSON.parse(JSON.stringify(orders));
 
+      // Optimistic
       setCompleted((prev) => prev.filter((o) => o.id !== order.id));
       setOrders((prev) => [
-        { ...order, status: "active", cooking: true },
+        {
+          ...order,
+          status: "active",
+          cooking: true,
+          cookingStartedAt: Date.now(),
+        },
         ...prev,
       ]);
 
@@ -492,7 +605,10 @@ function KdsPro() {
         if (!persisted || !persisted.anyInproc)
           throw new Error("Undo verify failed");
         toast(`Order #${order.id}: ${t("undone_to_active")}`);
-        await fetchPage();
+        await publish("startCooking", {
+          ...order,
+          cookingStartedAt: Date.now(),
+        });
       } catch (e) {
         console.error(e);
         setCompleted(rollbackCompleted);
@@ -500,17 +616,25 @@ function KdsPro() {
         toast.error("Undo failed to persist in database");
       }
     },
-    [orders, completed, buildRowsPerLine, verifyPersisted, t, fetchPage]
+    [orders, completed, buildRowsPerLine, verifyPersisted, t, selectedDepts]
   );
 
   const onRevertAction = useCallback(
     async (order) => {
-      const rows = buildRowsPerLine(order, "NEW"); // adjust status if needed
+      const rows = buildRowsPerLine(order, "NEW");
       const rollbackOrders = JSON.parse(JSON.stringify(orders));
 
+      // Optimistic
       setOrders((prev) =>
         prev.map((o) =>
-          o.id !== order.id ? o : { ...o, status: "pending", cooking: false }
+          o.id !== order.id
+            ? o
+            : {
+                ...o,
+                status: "pending",
+                cooking: false,
+                cookingStartedAt: null,
+              }
         )
       );
 
@@ -520,19 +644,20 @@ function KdsPro() {
         if (!persisted || !persisted.noneInproc)
           throw new Error("Revert verify failed");
         toast.success(`Order #${order.id} reverted to not started`);
-        await fetchPage();
+        await publish("revertOrder", order);
       } catch (e) {
         console.error(e);
         setOrders(rollbackOrders);
         toast.error("Revert did not persist in database");
       }
     },
-    [orders, buildRowsPerLine, verifyPersisted, fetchPage]
+    [orders, buildRowsPerLine, verifyPersisted, selectedDepts]
   );
 
   const toggleItemState = useCallback(
-    (orderId, itemId) => {
+    async (orderId, itemId) => {
       if (activeTab === "completed") return;
+      let nextStatusForItem = "none";
       setOrders((prev) =>
         prev.map((o) =>
           o.id !== orderId
@@ -544,13 +669,18 @@ function KdsPro() {
                   const states = ["none", "checked", "cancelled"];
                   const next =
                     states[(states.indexOf(it.itemStatus) + 1) % states.length];
+                  nextStatusForItem = next;
                   return { ...it, itemStatus: next };
                 }),
               }
         )
       );
+
+      try {
+        await publish("toggleItem", orderId, itemId, nextStatusForItem);
+      } catch {}
     },
-    [activeTab]
+    [activeTab, selectedDepts]
   );
 
   const toggleDept = (dept) => {
@@ -589,6 +719,51 @@ function KdsPro() {
     return "";
   };
 
+  /* ---------- Drag & Drop ---------- */
+  const handleDragStart = useCallback(
+    (event) => {
+      const { active } = event;
+      setActiveId(active.id);
+      const foundOrder = filtered.find((order) => order.id === active.id);
+      setActiveOrder(foundOrder || null);
+    },
+    [filtered]
+  );
+
+  const handleDragEnd = useCallback(
+    (event) => {
+      const { active, over } = event;
+      setActiveId(null);
+      setActiveOrder(null);
+
+      if (!over || active.id === over.id) return;
+
+      let currentList, setList;
+      if (activeTab === "active") {
+        currentList = orders;
+        setList = setOrders;
+      } else if (activeTab === "completed") {
+        currentList = completed;
+        setList = setCompleted;
+      } else {
+        currentList = scheduled;
+        setList = setScheduled;
+      }
+
+      const oldIndex = currentList.findIndex((item) => item.id === active.id);
+      const newIndex = currentList.findIndex((item) => item.id === over.id);
+      if (oldIndex === -1 || newIndex === -1) return;
+      const reorderedItems = arrayMove(currentList, oldIndex, newIndex);
+      setList(reorderedItems);
+    },
+    [activeTab, orders, completed, scheduled, filtered]
+  );
+
+  const handleDragCancel = useCallback(() => {
+    setActiveId(null);
+    setActiveOrder(null);
+  }, []);
+
   const headerTabs = [
     { key: "active", label: t("active_orders") },
     { key: "scheduled", label: t("scheduled") },
@@ -600,6 +775,10 @@ function KdsPro() {
     scheduled: scheduled.length,
     completed: completed.length,
   };
+
+  const currentSortableItems = useMemo(() => {
+    return filtered.map((order) => order.id);
+  }, [filtered]);
 
   return (
     <div className="h-dvh flex flex-col bg-background text-foreground transition-colors">
@@ -621,7 +800,6 @@ function KdsPro() {
       />
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Sidebar or its skeleton */}
         {isLoading ? (
           <SidebarSkeleton
             sidebarOpen={sidebarOpen}
@@ -637,7 +815,6 @@ function KdsPro() {
           />
         )}
 
-        {/* Main list */}
         <section className="flex-1 min-h-0 p-4 overflow-y-auto">
           <div className="max-w-[1800px] mx-auto">
             {isLoading ? (
@@ -651,33 +828,72 @@ function KdsPro() {
                 No orders to display.
               </p>
             ) : (
-              <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                {filtered.map((o, idx) => (
-                  <OrderCard
-                    key={`${o.id}-${o.createdAt}-${o.dest}-${idx}`}
-                    order={o}
-                    toggleItemState={toggleItemState}
-                    onPrimaryAction={onPrimaryAction}
-                    onUndoAction={onUndoAction}
-                    onRevertAction={onRevertAction}
-                    setEtaDialog={setEtaDialog}
-                    setOrderDialog={setOrderDialog}
-                    t={t}
-                    timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
-                    calcSubStatus={calcSubStatus}
-                    actionLabelAndClass={actionLabelAndClass}
-                    statusBorder={statusBorder}
-                    triBoxCls={triBoxCls}
-                    selectedDepts={selectedDepts}
-                  />
-                ))}
-              </div>
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCorners}
+                onDragStart={handleDragStart}
+                onDragEnd={handleDragEnd}
+                onDragCancel={handleDragCancel}
+                measuring={{
+                  droppable: { strategy: MeasuringStrategy.Always },
+                }}
+              >
+                <SortableContext
+                  items={currentSortableItems}
+                  strategy={rectSortingStrategy}
+                >
+                  <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                    {filtered.map((o, idx) => (
+                      <SortableOrderCard
+                        key={`${o.id}-${o.createdAt}-${o.dest}-${idx}`}
+                        order={o}
+                        toggleItemState={toggleItemState}
+                        onPrimaryAction={onPrimaryAction}
+                        onUndoAction={onUndoAction}
+                        onRevertAction={onRevertAction}
+                        setEtaDialog={setEtaDialog}
+                        setOrderDialog={setOrderDialog}
+                        t={t}
+                        timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
+                        calcSubStatus={calcSubStatus}
+                        actionLabelAndClass={actionLabelAndClass}
+                        statusBorder={statusBorder}
+                        triBoxCls={triBoxCls}
+                        selectedDepts={selectedDepts}
+                      />
+                    ))}
+                  </div>
+                </SortableContext>
+
+                <DragOverlay dropAnimation={null}>
+                  {activeOrder ? (
+                    <div style={{ pointerEvents: "none" }}>
+                      <OrderCard
+                        order={activeOrder}
+                        isDragging={true}
+                        toggleItemState={toggleItemState}
+                        onPrimaryAction={onPrimaryAction}
+                        onUndoAction={onUndoAction}
+                        onRevertAction={onRevertAction}
+                        setEtaDialog={setEtaDialog}
+                        setOrderDialog={setOrderDialog}
+                        t={t}
+                        timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
+                        calcSubStatus={calcSubStatus}
+                        actionLabelAndClass={actionLabelAndClass}
+                        statusBorder={statusBorder}
+                        triBoxCls={triBoxCls}
+                        selectedDepts={selectedDepts}
+                      />
+                    </div>
+                  ) : null}
+                </DragOverlay>
+              </DndContext>
             )}
           </div>
         </section>
       </div>
 
-      {/* REAL pagination from API total */}
       {!isLoading && totalPages > 1 && (
         <Pagination
           totalPages={totalPages}
@@ -688,7 +904,6 @@ function KdsPro() {
         />
       )}
 
-      {/* Dialogs */}
       <EtaDialog
         open={etaDialog.open}
         onOpenChange={(open) =>
@@ -698,6 +913,8 @@ function KdsPro() {
         orders={orders}
         setOrders={setOrders}
         toast={toast}
+        // if you want: on save, emit to SignalR:
+        // onSaveEta={(orderId, etaMinutes) => publish("setEta", orderId, etaMinutes)}
       />
 
       <FullscreenOrderDialog
@@ -733,5 +950,4 @@ function KdsPro() {
     </div>
   );
 }
-
 export default KdsPro;

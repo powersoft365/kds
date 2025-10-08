@@ -19,35 +19,37 @@ import { Slider } from "@/components/ui/slider";
 import { Maximize2, Check, X, Clock, Undo2, ChevronRight } from "lucide-react";
 
 /**
- * OrderCard
- * - FIX: when sub-status is "delayed" the card top border becomes RED.
- * - If order is cooking and NOT ready to complete → clicking primary button opens "revert" slider.
- * - If all items are checked (button shows COMPLETE) → clicking completes (no revert modal).
+ * OrderCard with full card drag functionality
+ * - Entire card body is draggable (drag listeners passed via dragHandleProps)
+ * - Visual feedback during drag operations
  */
 export function OrderCard({
   order,
   toggleItemState,
-  onPrimaryAction, // START COOKING or COMPLETE
-  onUndoAction, // completed → active
-  onRevertAction, // cooking → pending (revert)
+  onPrimaryAction,
+  onUndoAction,
+  onRevertAction,
   setEtaDialog,
   setOrderDialog,
   t = (s) => s,
   timeElapsedMin,
   calcSubStatus,
   actionLabelAndClass,
-  statusBorder, // function that returns a border class for non-delayed states
+  statusBorder,
   triBoxCls,
   selectedDepts,
+  // Drag and drop props
+  isDragging = false,
+  dragHandleProps = {},
+  ...props
 }) {
-  const elapsed = timeElapsedMin(order);
-  const sub = calcSubStatus(order); // e.g. "cooking", "delayed", "on-hold", "completed"
+  /* ---------- flags ---------- */
+  const sub = calcSubStatus(order);
   const { label: actionText = "Action", cls: actionClass = "" } =
     actionLabelAndClass(order) || {};
   const isCompleted = order.status === "completed";
   const isCooking = !!order.cooking && !isCompleted;
 
-  // Are all items checked (ready to COMPLETE)?
   const readyToComplete = React.useMemo(
     () =>
       Array.isArray(order.items) &&
@@ -56,86 +58,57 @@ export function OrderCard({
     [order.items]
   );
 
-  // Detect if rendered inside a dialog (to tweak layout)
+  // detect if rendered inside a dialog
   const rootRef = React.useRef(null);
   const [insideDialog, setInsideDialog] = React.useState(false);
   React.useEffect(() => {
     try {
       const el = rootRef.current;
       if (!el) return;
-      const inDialog = !!el.closest('[role="dialog"]');
-      setInsideDialog(inDialog);
+      setInsideDialog(!!el.closest('[role="dialog"]'));
     } catch {
       setInsideDialog(false);
     }
   }, []);
 
-  // ---- Slide-to-Undo (completed → active) ----
+  /* ---------- slide-to-undo (completed → active) ---------- */
   const [undoOpen, setUndoOpen] = React.useState(false);
-  const [slideVal, setSlideVal] = React.useState([0]);
-  const [confirmingUndo, setConfirmingUndo] = React.useState(false);
-
+  const [undoVal, setUndoVal] = React.useState([0]);
   const openUndo = () => {
-    setSlideVal([0]);
-    setConfirmingUndo(false);
+    setUndoVal([0]);
     setUndoOpen(true);
   };
-  const closeUndo = () => {
-    setUndoOpen(false);
-    setConfirmingUndo(false);
-    setSlideVal([0]);
-  };
-  const triggerUndo = () => {
-    if (confirmingUndo) return;
-    setConfirmingUndo(true);
-    try {
+  const closeUndo = () => setUndoOpen(false);
+  const commitUndo = (v) => {
+    const n = Array.isArray(v) ? v[0] : v;
+    if (n >= 100) {
       onUndoAction && onUndoAction(order);
-    } finally {
       setTimeout(() => closeUndo(), 150);
     }
   };
-  const onSlideCommit = (v) => {
-    const val = Array.isArray(v) ? v[0] : v;
-    if (val >= 100) triggerUndo();
-  };
 
-  // ---- Slide-to-Revert (cooking → pending) ----
+  /* ---------- slide-to-revert (cooking → pending) ---------- */
   const [revertOpen, setRevertOpen] = React.useState(false);
-  const [slideValRev, setSlideValRev] = React.useState([0]);
-  const [confirmingRevert, setConfirmingRevert] = React.useState(false);
-
+  const [revertVal, setRevertVal] = React.useState([0]);
   const openRevert = () => {
-    setSlideValRev([0]);
-    setConfirmingRevert(false);
+    setRevertVal([0]);
     setRevertOpen(true);
   };
-  const closeRevert = () => {
-    setRevertOpen(false);
-    setConfirmingRevert(false);
-    setSlideValRev([0]);
-  };
-  const triggerRevert = () => {
-    if (confirmingRevert) return;
-    setConfirmingRevert(true);
-    try {
+  const closeRevert = () => setRevertOpen(false);
+  const commitRevert = (v) => {
+    const n = Array.isArray(v) ? v[0] : v;
+    if (n >= 100) {
       onRevertAction && onRevertAction(order);
-    } finally {
       setTimeout(() => closeRevert(), 150);
     }
   };
-  const onSlideRevertCommit = (v) => {
-    const val = Array.isArray(v) ? v[0] : v;
-    if (val >= 100) triggerRevert();
-  };
 
-  // ---- Group items by department for display ----
+  /* ---------- items by department ---------- */
   const itemsByDept = (order.items || []).reduce((acc, it) => {
     const d = it.dept || "General";
-    if (!acc[d]) acc[d] = [];
-    acc[d].push(it);
+    (acc[d] ||= []).push(it);
     return acc;
   }, {});
-
   const showDeptHeaders =
     Array.isArray(selectedDepts) &&
     selectedDepts.includes("All") &&
@@ -146,32 +119,111 @@ export function OrderCard({
     const base = "px-2.5 py-1 rounded-full text-xs font-bold";
     if (val === "delayed") return `${base} bg-red-600 text-white`;
     if (val === "on-hold") return `${base} bg-violet-600 text-white`;
-    if (val === "cooking") return `${base} bg-amber-500 text-white`;
+    if (val === "cooking") return `${base} bg-amber-600 text-white`;
     if (val === "completed") return `${base} bg-emerald-600 text-white`;
     return `${base} bg-slate-600 text-white`;
   };
 
-  // ✅ Keep old UI: open revert slider only when cooking and NOT ready to complete.
+  /* ---------- COUNTDOWN (starts on Start Cooking) ---------- */
+  // Use cookingStartedAt from order props instead of local state
+  const startedAtMs = order.cookingStartedAt
+    ? typeof order.cookingStartedAt === "number"
+      ? order.cookingStartedAt
+      : Date.parse(order.cookingStartedAt)
+    : null;
+
+  const etaMin = Math.max(0, Number(order.eta || 0));
+  const totalMs = Math.max(1, etaMin * 60_000);
+
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const remainingMs = (() => {
+    if (!startedAtMs) return totalMs; // not started yet → show full ETA
+    const due = startedAtMs + totalMs;
+    return due - now;
+  })();
+
+  const fmt = (ms) => {
+    const neg = ms < 0;
+    const s = Math.abs(Math.ceil(ms / 1000));
+    const hh = Math.floor(s / 3600);
+    const mm = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    const body =
+      hh > 0
+        ? `${hh}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
+        : `${mm}:${String(ss).padStart(2, "0")}`;
+    return neg ? `-${body}` : body;
+  };
+
+  const pctLeft = Math.max(0, Math.min(1, remainingMs / totalMs));
+  const countdownTone =
+    remainingMs < 0
+      ? "text-red-600"
+      : pctLeft >= 0.5
+      ? "text-emerald-600"
+      : pctLeft >= 0.2
+      ? "text-amber-600"
+      : "text-red-600";
+
+  const overdue =
+    remainingMs < 0 ? (
+      <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-600 text-white animate-pulse">
+        OVERDUE
+      </span>
+    ) : null;
+
+  /* ---------- primary click behavior ---------- */
   const handlePrimaryClick = () => {
     if (isCooking && !readyToComplete) {
       openRevert();
-    } else {
-      onPrimaryAction && onPrimaryAction(order);
+      return;
     }
+    onPrimaryAction && onPrimaryAction(order);
   };
 
-  // ✅ NEW: if sub-status is "delayed", force red top border
-  const borderCls = sub === "delayed" ? "border-red-600" : statusBorder(order);
+  /* ---------- border color (delayed takes precedence) ---------- */
+  const borderCls =
+    sub === "delayed" || remainingMs < 0
+      ? "border-red-600"
+      : statusBorder(order);
 
+  // Prevent item toggle when dragging
+  const handleItemClick = (e, orderId, itemId) => {
+    // Check if we're in a drag operation by looking at the event
+    if (e.defaultPrevented || e.button !== 0) return;
+    if (isCompleted) return;
+    toggleItemState(orderId, itemId);
+  };
+
+  /* ---------- render ---------- */
   return (
     <>
-      <div ref={rootRef} className="contents">
+      {/* Main draggable wrapper - this is where dragHandleProps should be applied */}
+      <div
+        ref={rootRef}
+        className={`${
+          isDragging
+            ? "opacity-50 rotate-2 scale-105 transition-all duration-200"
+            : "transition-all duration-200"
+        }`}
+        {...dragHandleProps} // Apply drag handlers to the wrapper
+        {...props}
+      >
         <Card
           className={`h-full border-t-8 ${borderCls} ${
             sub === "on-hold" ? "shadow-[0_0_25px_rgba(139,92,246,0.6)]" : ""
-          } hover:shadow-lg transition-shadow grid grid-rows-[auto_1fr_auto] overflow-hidden`}
+          } hover:shadow-lg transition-all duration-200 grid grid-rows-[auto_1fr_auto] overflow-hidden ${
+            isDragging
+              ? "shadow-2xl border-blue-500 ring-2 ring-blue-400"
+              : "cursor-grab active:cursor-grabbing"
+          }`}
         >
-          {/* Header */}
+          {/* Header - Now part of draggable area */}
           <CardHeader className="flex flex-row items-center justify-between bg-muted/50 py-3">
             <div className="space-y-0.5">
               <div className="font-extrabold text-xl tracking-tight">
@@ -186,9 +238,9 @@ export function OrderCard({
             ) : null}
           </CardHeader>
 
-          {/* Content */}
-          <CardContent className="pt-4 pb-2">
-            <div className="relative max-h-[38vh] md:max-h-[28vh] lg:max-h-[240px] overflow-y-auto pr-1">
+          {/* Content - Fully draggable */}
+          <CardContent className="pt-4 pb-2 flex-1">
+            <div className="relative h-[300px] overflow-y-auto pr-1">
               {Object.entries(itemsByDept).map(([dept, items]) => (
                 <div key={dept} className="mb-3">
                   {showDeptHeaders && (
@@ -200,15 +252,12 @@ export function OrderCard({
                     {items.map((it) => {
                       const isChecked = it.itemStatus === "checked";
                       const isCancelled = it.itemStatus === "cancelled";
-                      const canToggle = !isCompleted;
 
                       return (
                         <li
                           key={`${order.id}-${dept}-${it.id}`}
-                          className="grid grid-cols-[auto_auto_1fr] gap-3 items-center pb-2 border-b last:border-0 rounded cursor-pointer hover:bg-muted/30 transition-colors"
-                          onClick={() =>
-                            canToggle && toggleItemState(order.id, it.id)
-                          }
+                          className="grid grid-cols-[auto_auto_1fr] gap-3 items-center pb-2 border-b last:border-0 rounded transition-colors select-none"
+                          onClick={(e) => handleItemClick(e, order.id, it.id)}
                         >
                           <div className={triBoxCls(it.itemStatus)}>
                             {isChecked ? (
@@ -254,74 +303,91 @@ export function OrderCard({
             </div>
           </CardContent>
 
-          {/* Footer */}
+          {/* Footer - Also draggable but with interactive elements */}
           <CardFooter className="p-0">
-            <div className="bg-muted/50 w-full flex flex-col gap-3 p-4">
-              {/* centered time row */}
-              <button
-                className="w-full text-center"
-                onClick={() => setEtaDialog({ open: true, orderId: order.id })}
-              >
-                <div className="text-xs text-muted-foreground font-medium">
-                  {t("time_eta")}
-                </div>
-                <div className="font-extrabold text-base flex items-center justify-center gap-2">
-                  <Clock className="w-4 h-4" />
-                  {t("Time")} {elapsed}/{order.eta}
-                </div>
-              </button>
+            <div className="bg-muted/50 w-full p-4">
+              {/* mobile: stacked; desktop: one line */}
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                {/* Left: COUNTDOWN button (opens ETA dialog) */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation(); // Prevent triggering drag
+                    setEtaDialog &&
+                      setEtaDialog({ open: true, orderId: order.id });
+                  }}
+                  className="inline-flex items-center justify-center md:justify-start gap-2 font-extrabold text-base rounded-md px-2 py-1 hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-0 focus-visible:ring-blue-500"
+                  aria-label="Adjust ETA"
+                  title="Adjust ETA"
+                >
+                  <Clock className={`w-4 h-4 ${countdownTone}`} />
+                  <span className={`${countdownTone}`}>{fmt(remainingMs)}</span>
+                  {overdue}
+                </button>
 
-              {/* actions */}
-              {insideDialog ? (
-                !isCompleted ? (
-                  <div className="flex justify-center">
+                {/* Right: actions (inline on desktop) */}
+                {insideDialog ? (
+                  !isCompleted ? (
+                    <div className="flex justify-center md:justify-end">
+                      <Button
+                        className={`w-full sm:max-w-xs md:w-auto justify-center font-bold ${actionClass}`}
+                        onClick={(e) => {
+                          e.stopPropagation(); // Prevent triggering drag
+                          handlePrimaryClick();
+                        }}
+                      >
+                        {actionText}
+                      </Button>
+                    </div>
+                  ) : null
+                ) : (
+                  <div className="grid grid-cols-2 gap-3 md:flex md:gap-3 md:justify-end">
+                    {isCompleted ? (
+                      <Button
+                        className="w-full md:w-auto justify-center font-bold bg-slate-700 hover:bg-slate-800"
+                        onClick={(e) => {
+                          e.stopPropagation(); // Prevent triggering drag
+                          openUndo();
+                        }}
+                        title={t("Undo")}
+                      >
+                        <Undo2 className="w-4 h-4 mr-2" />
+                        {t("Undo")}
+                      </Button>
+                    ) : (
+                      <Button
+                        className={`w-full md:w-auto justify-center font-bold ${actionClass}`}
+                        onClick={(e) => {
+                          e.stopPropagation(); // Prevent triggering drag
+                          handlePrimaryClick();
+                        }}
+                      >
+                        {actionText}
+                      </Button>
+                    )}
+
+                    {/* Details: icon-only */}
                     <Button
-                      className={`w-full sm:max-w-xs justify-center font-bold ${actionClass}`}
-                      onClick={handlePrimaryClick}
+                      variant="outline"
+                      className="w-full md:w-auto justify-center font-bold"
+                      onClick={(e) => {
+                        e.stopPropagation(); // Prevent triggering drag
+                        setOrderDialog({ open: true, orderId: order.id });
+                      }}
+                      aria-label={t("View details")}
+                      title={t("View details")}
                     >
-                      {actionText}
+                      <Maximize2 className="w-4 h-4" />
                     </Button>
                   </div>
-                ) : null
-              ) : (
-                <div className="grid grid-cols-2 gap-3">
-                  {isCompleted ? (
-                    <Button
-                      className="w-full justify-center font-bold bg-slate-700 hover:bg-slate-800"
-                      onClick={openUndo}
-                      title={t("Undo")}
-                    >
-                      <Undo2 className="w-4 h-4 mr-2" />
-                      {t("Undo")}
-                    </Button>
-                  ) : (
-                    <Button
-                      className={`w-full justify-center font-bold ${actionClass}`}
-                      onClick={handlePrimaryClick}
-                    >
-                      {actionText}
-                    </Button>
-                  )}
-
-                  <Button
-                    variant="outline"
-                    className="w-full justify-center font-bold"
-                    onClick={() =>
-                      setOrderDialog({ open: true, orderId: order.id })
-                    }
-                    aria-label={t("View details")}
-                  >
-                    <Maximize2 className="w-4 h-4 mr-2" />
-                    {t("Details")}
-                  </Button>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </CardFooter>
         </Card>
       </div>
 
-      {/* Slide-to-Undo (completed → active) */}
+      {/* Slide-to-Undo */}
       <Dialog
         open={undoOpen}
         onOpenChange={(o) => (o ? openUndo() : closeUndo())}
@@ -332,22 +398,20 @@ export function OrderCard({
               {t("Slide right to undo")}
             </DialogTitle>
           </DialogHeader>
-
           <div className="flex items-center justify-center py-3 bg-muted/50">
             <div className="h-1.5 w-12 rounded-full bg-muted-foreground/40" />
           </div>
-
           <SlideToConfirm
-            value={slideVal[0]}
-            setValue={(p) => setSlideVal([p])}
-            onCommit={() => onSlideCommit(slideVal)}
+            value={undoVal[0]}
+            setValue={(p) => setUndoVal([p])}
+            onCommit={() => commitUndo(undoVal)}
             label={t("Slide right to undo")}
             icon={<Undo2 className="w-5 h-5 mr-2" />}
           />
         </DialogContent>
       </Dialog>
 
-      {/* Slide-to-Revert (cooking → pending) */}
+      {/* Slide-to-Revert */}
       <Dialog
         open={revertOpen}
         onOpenChange={(o) => (o ? openRevert() : closeRevert())}
@@ -356,15 +420,13 @@ export function OrderCard({
           <DialogHeader>
             <DialogTitle className="sr-only">Slide right to revert</DialogTitle>
           </DialogHeader>
-
           <div className="flex items-center justify-center py-3 bg-muted/50">
             <div className="h-1.5 w-12 rounded-full bg-muted-foreground/40" />
           </div>
-
           <SlideToConfirm
-            value={slideValRev[0]}
-            setValue={(p) => setSlideValRev([p])}
-            onCommit={() => onSlideRevertCommit(slideValRev)}
+            value={revertVal[0]}
+            setValue={(p) => setRevertVal([p])}
+            onCommit={() => commitRevert(revertVal)}
             label="Slide right to revert"
             icon={<Undo2 className="w-5 h-5 mr-2" />}
           />
@@ -374,7 +436,7 @@ export function OrderCard({
   );
 }
 
-/** Generic slide-to-confirm (used for Undo and Revert) */
+/** Reusable slide-to-confirm rail */
 function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
   const railRef = React.useRef(null);
   const [dragging, setDragging] = React.useState(false);
@@ -393,10 +455,7 @@ function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
     e.currentTarget.setPointerCapture?.(e.pointerId);
     updateFromClientX(e.clientX);
   };
-  const onPointerMove = (e) => {
-    if (!dragging) return;
-    updateFromClientX(e.clientX);
-  };
+  const onPointerMove = (e) => dragging && updateFromClientX(e.clientX);
   const onPointerUp = (e) => {
     if (!dragging) return;
     setDragging(false);
@@ -404,11 +463,10 @@ function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
     onCommit?.();
   };
 
-  // keyboard / a11y path via hidden slider
   const onSliderChange = (v) => setValue(Array.isArray(v) ? v[0] : v);
   const onSliderCommit = (v) => {
-    const val = Array.isArray(v) ? v[0] : v;
-    if (val >= 100) onCommit?.();
+    const n = Array.isArray(v) ? v[0] : v;
+    if (n >= 100) onCommit?.();
   };
 
   return (
@@ -424,13 +482,10 @@ function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
-        {/* progress fill */}
         <div
           className="absolute inset-y-0 left-0 rounded-2xl bg-emerald-500/25 pointer-events-none"
           style={{ width: `${Math.min(value, 100)}%` }}
         />
-
-        {/* center hint */}
         <div
           className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity"
           style={{ opacity: value < 15 ? 1 : 0 }}
@@ -440,8 +495,6 @@ function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
             <ChevronRight className="w-4 h-4" />
           </div>
         </div>
-
-        {/* draggable pill */}
         <div
           className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full bg-background border border-muted-foreground/30 shadow flex items-center justify-center font-semibold px-2 h-12 pointer-events-none"
           style={{ left: `calc(${Math.min(value, 100)}% + 8px)` }}
@@ -449,8 +502,6 @@ function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
         >
           {icon}
         </div>
-
-        {/* hidden slider for keyboard/a11y */}
         <Slider
           value={[value]}
           onValueChange={onSliderChange}
@@ -463,7 +514,6 @@ function SlideToConfirm({ value, setValue, onCommit, label, icon }) {
         />
       </div>
 
-      {/* tiny footer */}
       <div className="mt-3 flex items-center justify-between">
         <div className="text-[10px] sm:text-xs text-muted-foreground select-none">
           {Math.round(value)}%
