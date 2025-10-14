@@ -1,3 +1,4 @@
+// app/kds-pro/KdsPro.jsx
 "use client";
 
 import React, {
@@ -29,6 +30,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 
 import SignalRBridge from "@/components/SignalRBridge";
+import SignalRDebugConsole from "@/components/SignalRDebugConsole";
 
 import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
@@ -52,7 +54,7 @@ import {
   fetchInvoiceBy365Code,
 } from "@/lib/api";
 
-/* ------------ Sortable Order Card Wrapper (memoized) ------------ */
+/* ------------ Sortable wrapper ------------ */
 const SortableOrderCard = memo(function SortableOrderCard({ order, ...props }) {
   const {
     attributes,
@@ -234,7 +236,7 @@ function KdsPro() {
   const [language, setLanguage] = useState("en");
   const t = useT(language);
 
-  // data buckets (current page only — API is paged)
+  // data buckets
   const [orders, setOrders] = useState([]);
   const [completed, setCompleted] = useState([]);
   const [scheduled, setScheduled] = useState([]);
@@ -249,7 +251,7 @@ function KdsPro() {
   const [activeTab, setActiveTab] = useState("active");
   const [searchTerm, setSearchTerm] = useState("");
 
-  // paging (real, from API)
+  // paging
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(24);
   const [totalPages, setTotalPages] = useState(1);
@@ -267,18 +269,13 @@ function KdsPro() {
   const abortRef = useRef(null);
   const requestSeq = useRef(0);
 
-  // Drag and drop state
+  // DnD
   const [activeId, setActiveId] = useState(null);
   const [activeOrder, setActiveOrder] = useState(null);
 
-  // Sensors
   const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { distance: 8 },
-    }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    })
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
   useEffect(() => {
@@ -290,7 +287,7 @@ function KdsPro() {
     return () => clearInterval(i);
   }, []);
 
-  /* ---------- fetch one page (uses API total_count) ---------- */
+  /* ---------- fetch one page ---------- */
   const fetchPage = useCallback(async () => {
     const mySeq = ++requestSeq.current;
     try {
@@ -303,7 +300,6 @@ function KdsPro() {
 
     setIsLoading(true);
     try {
-      // 1) total count
       const countPayload = await listBatchOrders({
         pageNumber: 1,
         pageSize: 1,
@@ -316,7 +312,6 @@ function KdsPro() {
       setTotalPages(pages);
       if (currentPage > pages) setCurrentPage(pages);
 
-      // 2) this page
       const dataPayload = await listBatchOrders({
         pageNumber: currentPage,
         pageSize: itemsPerPage,
@@ -331,7 +326,6 @@ function KdsPro() {
       setOrders(normalized.filter((o) => o.status !== "completed"));
       setCompleted(normalized.filter((o) => o.status === "completed"));
 
-      // depts
       const deptSet = new Set(["All"]);
       normalized.forEach((o) =>
         (o.items || []).forEach((it) => deptSet.add(it.dept || "General"))
@@ -354,13 +348,11 @@ function KdsPro() {
     };
   }, [fetchPage]);
 
-  // when filters/tabs change → reset to page 1
   const selectedKey = useMemo(() => selectedDepts.join("|"), [selectedDepts]);
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedKey, activeTab]);
 
-  // warm-up calls
   useEffect(() => {
     listBatchOrderHeaders({
       pageNumber: 1,
@@ -430,7 +422,7 @@ function KdsPro() {
         batch_invoice_number_365: String(batch),
         batch_invoice_code_365: String(batch),
         line_id_365: it.lineId365 || "",
-        status_code_365: nextStatus, // "INPROC", "APPROVED", or "NEW"
+        status_code_365: nextStatus,
         item_department_code_365: it.deptCode || "",
         time_to_complete: 0,
       }));
@@ -462,19 +454,19 @@ function KdsPro() {
           fresh.list_invoice_lines ||
           fresh.items ||
           [];
-        const toUpper = (v) => String(v || "").toUpperCase();
+        const up = (v) => String(v || "").toUpperCase();
         const anyInproc = items.some(
-          (l) => toUpper(l.status_code_365 || l.status_code) === "INPROC"
+          (l) => up(l.status_code_365 || l.status_code) === "INPROC"
         );
         const allApproved =
           items.length > 0 &&
           items.every((l) =>
             ["APPROVED", "DONE", "COMPLETED"].includes(
-              toUpper(l.status_code_365 || l.status_code)
+              up(l.status_code_365 || l.status_code)
             )
           );
         const noneInproc = items.every(
-          (l) => toUpper(l.status_code_365 || l.status_code) !== "INPROC"
+          (l) => up(l.status_code_365 || l.status_code) !== "INPROC"
         );
         return { anyInproc, allApproved, noneInproc };
       } catch {
@@ -484,29 +476,17 @@ function KdsPro() {
     [getBatchCode365]
   );
 
-  // Convenience: global SignalR API getter + publisher
+  /* ---------- SignalR publisher ---------- */
   const SR = () => (typeof window !== "undefined" ? window.SignalR : null);
-  const currentDeptForSend = () =>
+  const deptForOrderSend = () =>
     selectedDepts.includes("All") ? undefined : selectedDepts[0];
 
   const publish = async (fn, ...args) => {
     try {
       const api = SR();
       if (!api || !api[fn]) return;
-      // append dept as last param if helper supports it
-      const dept = currentDeptForSend();
-      if (
-        [
-          "send",
-          "startCooking",
-          "completeOrder",
-          "revertOrder",
-          "toggleItem",
-          "setEta",
-        ].includes(fn)
-      ) {
-        args.push(dept);
-      }
+      const dept = deptForOrderSend();
+      args.push(dept);
       await api[fn](...args);
     } catch (e) {
       console.error("[SignalR publish error]", e);
@@ -514,7 +494,7 @@ function KdsPro() {
     }
   };
 
-  /* ---------- actions (with SignalR sends) ---------- */
+  /* ---------- actions (REST + SignalR) ---------- */
   const onPrimaryAction = useCallback(
     async (order) => {
       const isComplete = (order.items || []).every(
@@ -523,7 +503,7 @@ function KdsPro() {
       const nextStatus = isComplete ? "APPROVED" : "INPROC";
       const rows = buildRowsPerLine(order, nextStatus);
 
-      // Optimistic UI update
+      // optimistic UI
       const rollback = JSON.parse(JSON.stringify(orders));
       const updatedOrders = orders.map((o) =>
         o.id !== order.id
@@ -535,7 +515,6 @@ function KdsPro() {
               cookingStartedAt: !isComplete ? Date.now() : o.cookingStartedAt,
             }
       );
-
       if (isComplete) {
         setOrders(updatedOrders.filter((o) => o.id !== order.id));
         setCompleted((prev) => [
@@ -559,7 +538,7 @@ function KdsPro() {
 
         if (isComplete) {
           toast.success(`Order #${order.id} completed`);
-          await publish("completeOrder", order); // SignalR send with creds
+          await publish("completeOrder", order);
         } else {
           toast.success(`Order #${order.id} ${t("started_cooking")}`);
           await publish("startCooking", {
@@ -569,7 +548,6 @@ function KdsPro() {
         }
       } catch (e) {
         console.error(e);
-        // Rollback
         setOrders(rollback);
         if (isComplete) {
           setCompleted((prev) => prev.filter((o) => o.id !== order.id));
@@ -587,7 +565,6 @@ function KdsPro() {
       const rollbackCompleted = JSON.parse(JSON.stringify(completed));
       const rollbackOrders = JSON.parse(JSON.stringify(orders));
 
-      // Optimistic
       setCompleted((prev) => prev.filter((o) => o.id !== order.id));
       setOrders((prev) => [
         {
@@ -624,7 +601,6 @@ function KdsPro() {
       const rows = buildRowsPerLine(order, "NEW");
       const rollbackOrders = JSON.parse(JSON.stringify(orders));
 
-      // Optimistic
       setOrders((prev) =>
         prev.map((o) =>
           o.id !== order.id
@@ -657,7 +633,10 @@ function KdsPro() {
   const toggleItemState = useCallback(
     async (orderId, itemId) => {
       if (activeTab === "completed") return;
+
       let nextStatusForItem = "none";
+      let deptForLine = undefined;
+
       setOrders((prev) =>
         prev.map((o) =>
           o.id !== orderId
@@ -670,6 +649,7 @@ function KdsPro() {
                   const next =
                     states[(states.indexOf(it.itemStatus) + 1) % states.length];
                   nextStatusForItem = next;
+                  deptForLine = it.deptCode || it.dept || undefined;
                   return { ...it, itemStatus: next };
                 }),
               }
@@ -677,10 +657,16 @@ function KdsPro() {
       );
 
       try {
-        await publish("toggleItem", orderId, itemId, nextStatusForItem);
-      } catch {}
+        const api = SR();
+        if (api?.toggleItem) {
+          await api.toggleItem(orderId, itemId, nextStatusForItem, deptForLine);
+        }
+      } catch (e) {
+        console.error("[SignalR toggleItem error]", e);
+        toast.error("Failed to send item toggle via SignalR");
+      }
     },
-    [activeTab, selectedDepts]
+    [activeTab]
   );
 
   const toggleDept = (dept) => {
@@ -700,10 +686,7 @@ function KdsPro() {
           cls: "bg-emerald-600 hover:bg-emerald-700",
         };
       if (o.cooking)
-        return {
-          label: t("cooking"),
-          cls: "bg-amber-500 hover:bg-amber-600",
-        };
+        return { label: t("cooking"), cls: "bg-amber-500 hover:bg-amber-600" };
       return {
         label: t("start_cooking"),
         cls: "bg-blue-600 hover:bg-blue-700",
@@ -719,7 +702,7 @@ function KdsPro() {
     return "";
   };
 
-  /* ---------- Drag & Drop ---------- */
+  /* ---------- DnD ---------- */
   const handleDragStart = useCallback(
     (event) => {
       const { active } = event;
@@ -735,7 +718,6 @@ function KdsPro() {
       const { active, over } = event;
       setActiveId(null);
       setActiveOrder(null);
-
       if (!over || active.id === over.id) return;
 
       let currentList, setList;
@@ -776,13 +758,16 @@ function KdsPro() {
     completed: completed.length,
   };
 
-  const currentSortableItems = useMemo(() => {
-    return filtered.map((order) => order.id);
-  }, [filtered]);
+  const currentSortableItems = useMemo(
+    () => filtered.map((order) => order.id),
+    [filtered]
+  );
 
   return (
     <div className="h-dvh flex flex-col bg-background text-foreground transition-colors">
+      {/* Hub bridge + floating console */}
       <SignalRBridge onOrderUpdate={fetchPage} />
+      <SignalRDebugConsole initialOpen={false} />
 
       <Header
         currentTime={currentTime}
@@ -832,11 +817,19 @@ function KdsPro() {
                 sensors={sensors}
                 collisionDetection={closestCorners}
                 onDragStart={handleDragStart}
+                onDragMove={() => {}}
+                onDragAbort={() => {}}
+                onDragPending={() => {}}
+                onDragOver={() => {}}
                 onDragEnd={handleDragEnd}
                 onDragCancel={handleDragCancel}
-                measuring={{
-                  droppable: { strategy: MeasuringStrategy.Always },
-                }}
+                measuring={
+                  {
+                    // draggable: { strategy: MeasuringStrategy.Always },
+                    // dragOverlay: { strategy: MeasuringStrategy.BeforeDragging },
+                    // droppable: { strategy: MeasuringStrategy.Always },
+                  }
+                }
               >
                 <SortableContext
                   items={currentSortableItems}
@@ -870,7 +863,7 @@ function KdsPro() {
                     <div style={{ pointerEvents: "none" }}>
                       <OrderCard
                         order={activeOrder}
-                        isDragging={true}
+                        isDragging
                         toggleItemState={toggleItemState}
                         onPrimaryAction={onPrimaryAction}
                         onUndoAction={onUndoAction}
@@ -913,8 +906,6 @@ function KdsPro() {
         orders={orders}
         setOrders={setOrders}
         toast={toast}
-        // if you want: on save, emit to SignalR:
-        // onSaveEta={(orderId, etaMinutes) => publish("setEta", orderId, etaMinutes)}
       />
 
       <FullscreenOrderDialog

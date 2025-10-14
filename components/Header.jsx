@@ -13,6 +13,7 @@ import {
   ChevronDown,
   X,
   Moon,
+  Loader2,
 } from "lucide-react";
 
 import {
@@ -25,9 +26,16 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 /**
- * Header (with “Show Department Selection (taglist)” trigger)
- * - Dropdown remains open while choosing
- * - Departments sorted alphabetically; "All" pinned first
+ * Header with Department filter "lock" behavior:
+ * - When you click one department to (re)load orders, that department shows a spinner
+ * - ALL OTHER department controls (pills + dropdown items) are disabled until loading finishes
+ * - Supports both sync and async toggleDept handlers
+ * - Keeps dropdown open while choosing
+ * - Departments sorted alphabetically; "All" stays pinned first
+ *
+ * NOTE (per your global layout rule):
+ * - No max-w or any `px-*` padding on the OUTER containers.
+ *   Inner elements can use padding as needed.
  */
 export function Header({
   currentTime,
@@ -45,6 +53,14 @@ export function Header({
 }) {
   const [isMobileTrayOpen, setIsMobileTrayOpen] = React.useState(false);
 
+  // Track the single department currently loading (lock). When set, others are disabled.
+  const [activeLoadingDept, setActiveLoadingDept] = React.useState(null);
+
+  const isLocked = activeLoadingDept !== null;
+
+  const onToggleMobileTray = () => setIsMobileTrayOpen((v) => !v);
+  const closeMobileTray = () => setIsMobileTrayOpen(false);
+
   // sort departments alphabetically; keep "All" first
   const sortedDepartments = React.useMemo(() => {
     const list = Array.isArray(departments) ? [...departments] : [];
@@ -61,27 +77,62 @@ export function Header({
     return isAll ? 1 : selectedDepts?.length || 0;
   }, [selectedDepts]);
 
-  const onToggleMobileTray = () => setIsMobileTrayOpen((v) => !v);
-  const closeMobileTray = () => setIsMobileTrayOpen(false);
+  const isPromise = (p) =>
+    !!p &&
+    (typeof p === "object" || typeof p === "function") &&
+    typeof p.then === "function";
+
+  // Wrap parent's toggleDept to enforce the "lock others while loading" behavior
+  const handleToggleDept = (dept) => {
+    // If already locked on another department, do nothing
+    if (isLocked && activeLoadingDept !== dept) return;
+
+    // Lock on this department
+    setActiveLoadingDept(dept);
+    try {
+      const result = toggleDept(dept);
+
+      if (isPromise(result)) {
+        Promise.resolve(result)
+          .catch(() => {
+            // swallow to keep UI responsive; in real app you could toast error
+          })
+          .finally(() => setActiveLoadingDept(null));
+      } else {
+        // Sync handler — still show a tiny spinner time so the lock feels consistent
+        setTimeout(() => setActiveLoadingDept(null), 450);
+      }
+    } catch {
+      setActiveLoadingDept(null);
+    }
+  };
 
   const DeptPills = (
     <div className="flex items-center">
       <div className="flex gap-1 bg-muted/70 rounded-md p-1 overflow-x-auto scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent md:overflow-visible">
         {sortedDepartments.map((d) => {
           const isActive = selectedDepts.includes(d);
+          const isThisLoading = activeLoadingDept === d;
+          // While locked, disable everything (including the clicked one to prevent double fires)
+          const disabled = isLocked;
           return (
             <Button
               key={d}
               size="sm"
               variant={isActive ? "default" : "ghost"}
-              onClick={() => toggleDept(d)}
+              onClick={() => handleToggleDept(d)}
               className={`${
                 isActive ? "" : "text-muted-foreground"
-              } whitespace-nowrap`}
+              } whitespace-nowrap inline-flex items-center gap-1`}
               aria-pressed={isActive}
               aria-label={`Filter by ${d}`}
+              aria-busy={isThisLoading}
+              disabled={disabled}
             >
-              {d}
+              {isThisLoading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : null}
+              <span>{d}</span>
             </Button>
           );
         })}
@@ -89,7 +140,7 @@ export function Header({
     </div>
   );
 
-  // Dropdown: stays OPEN; renamed trigger label
+  // Dropdown: stays OPEN; trigger label adjusted
   const DeptDropdown = (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -110,17 +161,29 @@ export function Header({
       <DropdownMenuContent align="end" side="bottom" className="w-56">
         <DropdownMenuLabel>Filter by Department</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {sortedDepartments.map((d) => (
-          <DropdownMenuCheckboxItem
-            key={d}
-            checked={selectedDepts.includes(d)}
-            onSelect={(e) => e.preventDefault()} // keep menu open
-            onCheckedChange={() => toggleDept(d)}
-            className="cursor-pointer"
-          >
-            {d}
-          </DropdownMenuCheckboxItem>
-        ))}
+        {sortedDepartments.map((d) => {
+          const isThisLoading = activeLoadingDept === d;
+          // While locked, all items disabled
+          const disabled = isLocked;
+          return (
+            <DropdownMenuCheckboxItem
+              key={d}
+              checked={selectedDepts.includes(d)}
+              onSelect={(e) => e.preventDefault()} // keep menu open
+              onCheckedChange={() => handleToggleDept(d)}
+              className={`cursor-pointer ${disabled ? "opacity-80" : ""}`}
+              disabled={disabled}
+              aria-busy={isThisLoading}
+            >
+              <span className="inline-flex items-center gap-2">
+                {isThisLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : null}
+                <span>{d}</span>
+              </span>
+            </DropdownMenuCheckboxItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -129,9 +192,22 @@ export function Header({
     <header
       className="w-full border-b bg-background sticky top-0 z-30"
       style={{ borderBottomWidth: 3 }}
+      aria-busy={isLocked}
     >
-      {/* Top Row */}
-      <div className="flex h-[60px] md:h-[65px] items-center justify-between gap-2 md:gap-3 px-3 md:px-4">
+      {/* Thin global loader bar (visible whenever any dept is loading) */}
+      <div
+        className={`h-0.5 ${
+          isLocked ? "bg-primary animate-pulse" : "bg-transparent"
+        }`}
+        role="progressbar"
+        aria-hidden={!isLocked}
+      />
+      <span className="sr-only" aria-live="polite">
+        {isLocked ? "Loading department orders…" : "Idle"}
+      </span>
+
+      {/* Top Row (OUTER container: no px padding here) */}
+      <div className="flex h-[60px] md:h-[65px] items-center justify-between gap-2 md:gap-3">
         {/* Brand + Time */}
         <div className="flex items-center gap-3 md:gap-4 min-w-0">
           <h1 className="tracking-widest font-extrabold text-lg md:text-xl lg:text-2xl truncate">
@@ -229,8 +305,8 @@ export function Header({
         </div>
       </div>
 
-      {/* Mobile Tabs */}
-      <nav className="md:hidden border-t px-2 pb-1">
+      {/* Mobile Tabs (OUTER container: no px padding here) */}
+      <nav className="md:hidden border-t pb-1">
         <div className="flex gap-1 overflow-x-auto snap-x snap-mandatory scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent">
           {headerTabs.map((tab) => {
             const isActive = activeTab === tab.key;
@@ -258,10 +334,10 @@ export function Header({
         </div>
       </nav>
 
-      {/* Mobile Slide-Down Tray */}
+      {/* Mobile Slide-Down Tray (OUTER container: no px padding here) */}
       <div
         id="mobile-tray"
-        className={`md:hidden grid grid-cols-1 gap-3 px-3 pb-3 border-t overflow-hidden transition-[max-height,opacity] duration-300 ${
+        className={`md:hidden grid grid-cols-1 gap-3 pb-3 border-t overflow-hidden transition-[max-height,opacity] duration-300 ${
           isMobileTrayOpen ? "max-h-[520px] opacity-100" : "max-h-0 opacity-0"
         }`}
       >
