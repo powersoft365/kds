@@ -18,7 +18,6 @@ import {
   useSensor,
   useSensors,
   DragOverlay,
-  MeasuringStrategy,
 } from "@dnd-kit/core";
 import {
   arrayMove,
@@ -42,7 +41,7 @@ import { FullscreenOrderDialog } from "@/components/FullscreenOrderDialog";
 
 import { OrderSkeleton } from "@/components/OrderSkeleton";
 import { SidebarSkeleton } from "@/components/SidebarSkeleton";
-
+import i18n from "@/lib/i18n";
 import {
   listBatchOrders,
   listBatchOrderHeaders,
@@ -83,25 +82,6 @@ const SortableOrderCard = memo(function SortableOrderCard({ order, ...props }) {
   );
 });
 
-/* ------------ i18n ------------ */
-const i18n = {
-  en: {
-    active_orders: "Active Orders",
-    scheduled: "Scheduled",
-    history: "History",
-    totals: "TOTALS",
-    search_placeholder: "Search orders...",
-    start_cooking: "START COOKING",
-    complete: "COMPLETE",
-    cooking: "COOKING",
-    undo_completed: "UNDO",
-    time_eta: "TIME / ETA",
-    settings: "Settings",
-    undone_to_active: "Order moved back to Active.",
-    started_cooking: "started cooking.",
-    completed_to_history: "Order has been moved to completed history",
-  },
-};
 const useT =
   (lng = "en") =>
   (k) =>
@@ -117,6 +97,14 @@ const minutesSince = (ts) => {
 function normalizeOrders(list, page, pageSize) {
   return list.map((raw, idx) => {
     const header = raw.invoice_header || {};
+    const tableObj = raw.table || header.table || {};
+    const tableId =
+      raw.table_id ||
+      header.table_id ||
+      tableObj.table_id ||
+      tableObj.id ||
+      null;
+
     const code365 =
       raw.batch_invoice_number_365 ||
       raw.batch_invoice_code_365 ||
@@ -197,6 +185,8 @@ function normalizeOrders(list, page, pageSize) {
       onHold: false,
       eta: 10,
       items,
+      tableId, // for add-items API if needed
+      _batchCode365: code365 || "",
       _raw: raw,
     };
   });
@@ -262,7 +252,7 @@ function KdsPro() {
     open: false,
     orderId: null,
   });
-  const [settingsDialog, setSettingsDialog] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
 
   // loading/safety
   const [isLoading, setIsLoading] = useState(false);
@@ -401,19 +391,7 @@ function KdsPro() {
   const totalsByDept = useMemo(() => buildTotalsByDept(filtered), [filtered]);
 
   /* ---------- helpers for writes ---------- */
-  const getBatchCode365 = useCallback((o) => {
-    const h = o._raw?.invoice_header || {};
-    return (
-      o._raw?.batch_invoice_number_365 ||
-      o._raw?.batch_invoice_code_365 ||
-      o._raw?.invoice_365_code ||
-      h.invoice_365_code ||
-      h.batch_invoice_number_365 ||
-      h.batch_invoice_code_365 ||
-      o._raw?.shopping_cart_code ||
-      o.id
-    );
-  }, []);
+  const getBatchCode365 = useCallback((o) => o._batchCode365 || o.id, []);
 
   const buildRowsPerLine = useCallback(
     (order, nextStatus) => {
@@ -702,6 +680,35 @@ function KdsPro() {
     return "";
   };
 
+  /* ---------- Modifiers: apply (OrderCard manages the modal itself) ---------- */
+  const onApplyItemModifiers = useCallback((orderId, itemId, names) => {
+    setOrders((prev) =>
+      prev.map((o) =>
+        o.id !== orderId
+          ? o
+          : {
+              ...o,
+              items: (o.items || []).map((it) =>
+                it.id === itemId
+                  ? {
+                      ...it,
+                      mods: Array.from(new Set([...(it.mods || []), ...names])),
+                    }
+                  : it
+              ),
+            }
+      )
+    );
+    try {
+      const api = SR();
+      if (api?.addModifiers) {
+        api.addModifiers(orderId, itemId, names);
+      }
+    } catch (e) {
+      console.warn("[SignalR addModifiers warn]", e);
+    }
+  }, []);
+
   /* ---------- DnD ---------- */
   const handleDragStart = useCallback(
     (event) => {
@@ -765,9 +772,9 @@ function KdsPro() {
 
   return (
     <div className="h-dvh flex flex-col bg-background text-foreground transition-colors">
-      {/* Hub bridge + floating console */}
+      {/* ✅ SignalR stays exactly as before; console opens by default now */}
       <SignalRBridge onOrderUpdate={fetchPage} />
-      <SignalRDebugConsole initialOpen={false} />
+      <SignalRDebugConsole initialOpen={true} />
 
       <Header
         currentTime={currentTime}
@@ -781,7 +788,7 @@ function KdsPro() {
         departments={departments}
         selectedDepts={selectedDepts}
         toggleDept={toggleDept}
-        setSettingsDialog={setSettingsDialog}
+        setSettingsDialog={setSettingsDialogOpen}
       />
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -801,89 +808,84 @@ function KdsPro() {
         )}
 
         <section className="flex-1 min-h-0 p-4 overflow-y-auto">
-          <div className="max-w-[1800px] mx-auto">
-            {isLoading ? (
-              <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                {Array.from({ length: itemsPerPage }).map((_, i) => (
-                  <OrderSkeleton key={`s-${i}`} />
-                ))}
-              </div>
-            ) : filtered.length === 0 ? (
-              <p className="text-center text-sm text-muted-foreground w-full py-16">
-                No orders to display.
-              </p>
-            ) : (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCorners}
-                onDragStart={handleDragStart}
-                onDragMove={() => {}}
-                onDragAbort={() => {}}
-                onDragPending={() => {}}
-                onDragOver={() => {}}
-                onDragEnd={handleDragEnd}
-                onDragCancel={handleDragCancel}
-                measuring={
-                  {
-                    // draggable: { strategy: MeasuringStrategy.Always },
-                    // dragOverlay: { strategy: MeasuringStrategy.BeforeDragging },
-                    // droppable: { strategy: MeasuringStrategy.Always },
-                  }
-                }
+          {isLoading ? (
+            <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {Array.from({ length: itemsPerPage }).map((_, i) => (
+                <OrderSkeleton key={`s-${i}`} />
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
+            <p className="text-center text-sm text-muted-foreground w-full py-16">
+              No orders to display.
+            </p>
+          ) : (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCorners}
+              onDragStart={handleDragStart}
+              onDragMove={() => {}}
+              onDragAbort={() => {}}
+              onDragPending={() => {}}
+              onDragOver={() => {}}
+              onDragEnd={handleDragEnd}
+              onDragCancel={handleDragCancel}
+            >
+              <SortableContext
+                items={currentSortableItems}
+                strategy={rectSortingStrategy}
               >
-                <SortableContext
-                  items={currentSortableItems}
-                  strategy={rectSortingStrategy}
-                >
-                  <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                    {filtered.map((o, idx) => (
-                      <SortableOrderCard
-                        key={`${o.id}-${o.createdAt}-${o.dest}-${idx}`}
-                        order={o}
-                        toggleItemState={toggleItemState}
-                        onPrimaryAction={onPrimaryAction}
-                        onUndoAction={onUndoAction}
-                        onRevertAction={onRevertAction}
-                        setEtaDialog={setEtaDialog}
-                        setOrderDialog={setOrderDialog}
-                        t={t}
-                        timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
-                        calcSubStatus={calcSubStatus}
-                        actionLabelAndClass={actionLabelAndClass}
-                        statusBorder={statusBorder}
-                        triBoxCls={triBoxCls}
-                        selectedDepts={selectedDepts}
-                      />
-                    ))}
-                  </div>
-                </SortableContext>
+                <div className="grid gap-4 md:gap-5 grid-cols-1 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                  {filtered.map((o, idx) => (
+                    <SortableOrderCard
+                      key={`${o.id}-${o.createdAt}-${o.dest}-${idx}`}
+                      order={o}
+                      toggleItemState={toggleItemState}
+                      onPrimaryAction={onPrimaryAction}
+                      onUndoAction={onUndoAction}
+                      onRevertAction={onRevertAction}
+                      setEtaDialog={setEtaDialog}
+                      setOrderDialog={setOrderDialog}
+                      /* ⛔️ do NOT pass onOpenModifier — let OrderCard open its own modal */
+                      onApplyItemModifiers={onApplyItemModifiers}
+                      t={t}
+                      timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
+                      calcSubStatus={calcSubStatus}
+                      actionLabelAndClass={actionLabelAndClass}
+                      statusBorder={statusBorder}
+                      triBoxCls={triBoxCls}
+                      selectedDepts={selectedDepts}
+                    />
+                  ))}
+                </div>
+              </SortableContext>
 
-                <DragOverlay dropAnimation={null}>
-                  {activeOrder ? (
-                    <div style={{ pointerEvents: "none" }}>
-                      <OrderCard
-                        order={activeOrder}
-                        isDragging
-                        toggleItemState={toggleItemState}
-                        onPrimaryAction={onPrimaryAction}
-                        onUndoAction={onUndoAction}
-                        onRevertAction={onRevertAction}
-                        setEtaDialog={setEtaDialog}
-                        setOrderDialog={setOrderDialog}
-                        t={t}
-                        timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
-                        calcSubStatus={calcSubStatus}
-                        actionLabelAndClass={actionLabelAndClass}
-                        statusBorder={statusBorder}
-                        triBoxCls={triBoxCls}
-                        selectedDepts={selectedDepts}
-                      />
-                    </div>
-                  ) : null}
-                </DragOverlay>
-              </DndContext>
-            )}
-          </div>
+              <DragOverlay dropAnimation={null}>
+                {activeOrder ? (
+                  <div style={{ pointerEvents: "none" }}>
+                    <OrderCard
+                      order={activeOrder}
+                      isDragging
+                      toggleItemState={toggleItemState}
+                      onPrimaryAction={onPrimaryAction}
+                      onUndoAction={onUndoAction}
+                      onRevertAction={onRevertAction}
+                      setEtaDialog={setEtaDialog}
+                      setOrderDialog={setOrderDialog}
+                      /* ⛔️ also here: don't pass onOpenModifier */
+                      onApplyItemModifiers={onApplyItemModifiers}
+                      t={t}
+                      timeElapsedMin={(ord) => minutesSince(ord.createdAt)}
+                      calcSubStatus={calcSubStatus}
+                      actionLabelAndClass={actionLabelAndClass}
+                      statusBorder={statusBorder}
+                      triBoxCls={triBoxCls}
+                      selectedDepts={selectedDepts}
+                    />
+                  </div>
+                ) : null}
+              </DragOverlay>
+            </DndContext>
+          )}
         </section>
       </div>
 
@@ -931,8 +933,8 @@ function KdsPro() {
       />
 
       <SettingsDialog
-        open={settingsDialog}
-        onOpenChange={setSettingsDialog}
+        open={settingsDialogOpen}
+        onOpenChange={setSettingsDialogOpen}
         language={language}
         setLanguage={setLanguage}
         i18n={i18n}

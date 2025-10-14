@@ -12,14 +12,24 @@ const dispatcher =
     ? new Agent({ connect: { rejectUnauthorized: false } })
     : undefined;
 
-// ✅ Make this async and await params
-async function upstreamURL(req, params) {
-  const resolvedParams = await params;
-  const path = Array.isArray(resolvedParams?.path)
-    ? resolvedParams.path.join("/")
-    : "";
-  const { search } = new URL(req.url);
-  return `${BASE}/${path}${search || ""}`;
+function joinPath(seg) {
+  if (!seg) return "";
+  return Array.isArray(seg) ? seg.join("/") : String(seg);
+}
+
+// 🔹 MUST await params (Next.js rule)
+async function upstreamURL(req, paramsPromise) {
+  const params = await paramsPromise;
+  const path = joinPath(params?.path);
+  const u = new URL(req.url);
+
+  // We’ll build the upstream URL first…
+  const upstream = new URL(`${BASE}/${path}`);
+  // copy original query params
+  for (const [k, v] of u.searchParams.entries())
+    upstream.searchParams.append(k, v);
+
+  return upstream;
 }
 
 async function proxyPOST(req, ctx) {
@@ -27,10 +37,12 @@ async function proxyPOST(req, ctx) {
   try {
     bodyObj = await req.json();
   } catch {}
+
+  // Ensure token is in the body per PS365 convention
   if (!bodyObj.api_credentials) bodyObj.api_credentials = { token: TOKEN };
 
-  const url = await upstreamURL(req, ctx.params); // ✅ await
-  const res = await fetch(url, {
+  const urlObj = await upstreamURL(req, ctx.params);
+  const res = await fetch(urlObj.toString(), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(bodyObj),
@@ -47,10 +59,15 @@ async function proxyPOST(req, ctx) {
 }
 
 async function proxyGET(req, ctx) {
-  const url = await upstreamURL(req, ctx.params); // ✅ await
-  const res = await fetch(url, {
+  // Build upstream URL and inject token as QUERY (per Postman)
+  const urlObj = await upstreamURL(req, ctx.params);
+  if (TOKEN && !urlObj.searchParams.has("token")) {
+    urlObj.searchParams.set("token", TOKEN);
+  }
+
+  const res = await fetch(urlObj.toString(), {
     method: "GET",
-    headers: { "content-type": "application/json", token: TOKEN },
+    headers: { "content-type": "application/json" },
     dispatcher,
   });
 
@@ -66,19 +83,15 @@ async function proxyGET(req, ctx) {
 export async function GET(req, ctx) {
   return proxyGET(req, ctx);
 }
-
 export async function POST(req, ctx) {
   return proxyPOST(req, ctx);
 }
-
 export async function PUT(req, ctx) {
   return proxyPOST(req, ctx);
 }
-
 export async function PATCH(req, ctx) {
   return proxyPOST(req, ctx);
 }
-
 export async function DELETE(req, ctx) {
   return proxyPOST(req, ctx);
 }

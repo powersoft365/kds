@@ -16,12 +16,26 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Slider } from "@/components/ui/slider";
-import { Maximize2, Check, X, Clock, Undo2, ChevronRight } from "lucide-react";
+import {
+  Maximize2,
+  Check,
+  X,
+  Clock,
+  Undo2,
+  ChevronRight,
+  PlusSquare,
+} from "lucide-react";
 
 /**
- * OrderCard with full card drag functionality
- * - Entire card body is draggable (drag listeners passed via dragHandleProps)
- * - Visual feedback during drag operations
+ * OrderCard with full card drag functionality + read-only per-item Modifiers modal.
+ *
+ * Fixes:
+ * - Removed spreading of unknown props into DOM (no {...props}), which caused warnings like
+ *   "Unknown event handler property `onApplyItemModifiers`" and "React does not recognize
+ *   the `timeElapsedMin` prop on a DOM element".
+ * - Notes button only renders when the item already has modifiers (mods.length > 0).
+ * - Clicking Notes or anywhere inside the modal never toggles the row.
+ * - Clicking the overlay closes the modal and won’t toggle the row beneath (guarded).
  */
 export function OrderCard({
   order,
@@ -31,19 +45,18 @@ export function OrderCard({
   onRevertAction,
   setEtaDialog,
   setOrderDialog,
+  // the following are used internally / for styling logic, not forwarded to DOM
   t = (s) => s,
-  timeElapsedMin,
+  timeElapsedMin, // safe to accept; we simply don't forward it to DOM
   calcSubStatus,
   actionLabelAndClass,
   statusBorder,
   triBoxCls,
   selectedDepts,
-  // Drag and drop props
   isDragging = false,
+  // dnd-kit drag listeners/attrs only
   dragHandleProps = {},
-  ...props
 }) {
-  /* ---------- flags ---------- */
   const sub = calcSubStatus(order);
   const { label: actionText = "Action", cls: actionClass = "" } =
     actionLabelAndClass(order) || {};
@@ -58,7 +71,6 @@ export function OrderCard({
     [order.items]
   );
 
-  // detect if rendered inside a dialog
   const rootRef = React.useRef(null);
   const [insideDialog, setInsideDialog] = React.useState(false);
   React.useEffect(() => {
@@ -71,7 +83,7 @@ export function OrderCard({
     }
   }, []);
 
-  /* ---------- slide-to-undo (completed → active) ---------- */
+  /* ---------- slide-to-undo ---------- */
   const [undoOpen, setUndoOpen] = React.useState(false);
   const [undoVal, setUndoVal] = React.useState([0]);
   const openUndo = () => {
@@ -87,7 +99,7 @@ export function OrderCard({
     }
   };
 
-  /* ---------- slide-to-revert (cooking → pending) ---------- */
+  /* ---------- slide-to-revert ---------- */
   const [revertOpen, setRevertOpen] = React.useState(false);
   const [revertVal, setRevertVal] = React.useState([0]);
   const openRevert = () => {
@@ -124,8 +136,7 @@ export function OrderCard({
     return `${base} bg-slate-600 text-white`;
   };
 
-  /* ---------- COUNTDOWN (starts on Start Cooking) ---------- */
-  // Use cookingStartedAt from order props instead of local state
+  /* ---------- countdown ---------- */
   const startedAtMs = order.cookingStartedAt
     ? typeof order.cookingStartedAt === "number"
       ? order.cookingStartedAt
@@ -142,7 +153,7 @@ export function OrderCard({
   }, []);
 
   const remainingMs = (() => {
-    if (!startedAtMs) return totalMs; // not started yet → show full ETA
+    if (!startedAtMs) return totalMs;
     const due = startedAtMs + totalMs;
     return due - now;
   })();
@@ -177,7 +188,6 @@ export function OrderCard({
       </span>
     ) : null;
 
-  /* ---------- primary click behavior ---------- */
   const handlePrimaryClick = () => {
     if (isCooking && !readyToComplete) {
       openRevert();
@@ -186,24 +196,52 @@ export function OrderCard({
     onPrimaryAction && onPrimaryAction(order);
   };
 
-  /* ---------- border color (delayed takes precedence) ---------- */
   const borderCls =
     sub === "delayed" || remainingMs < 0
       ? "border-red-600"
       : statusBorder(order);
 
-  // Prevent item toggle when dragging
+  /* ---------- Modifier modal state + overlay click guard ---------- */
+  const [modOpenFor, setModOpenFor] = React.useState(null);
+
+  // Guard the next row click after overlay-closing to avoid falling through.
+  const overlayCloseGuardUntil = React.useRef(0);
+  const setGuardForNextClick = () => {
+    overlayCloseGuardUntil.current = Date.now() + 250;
+  };
+
+  /**
+   * Row click (checkbox toggle).
+   * - Ignore if a modal is open.
+   * - Ignore if click came from an element with data-stop-item-click="true".
+   * - Ignore if we are inside the guard window after overlay close.
+   */
   const handleItemClick = (e, orderId, itemId) => {
-    // Check if we're in a drag operation by looking at the event
     if (e.defaultPrevented || e.button !== 0) return;
     if (isCompleted) return;
+
+    if (modOpenFor !== null) return;
+
+    if (Date.now() < overlayCloseGuardUntil.current) return;
+
+    const target = e.target;
+    if (target?.closest?.('[data-stop-item-click="true"]')) return;
+
     toggleItemState(orderId, itemId);
   };
 
-  /* ---------- render ---------- */
+  const openMods = (e, it) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setModOpenFor(it.id);
+  };
+  const closeMods = (closedByOverlay = false) => {
+    if (closedByOverlay) setGuardForNextClick();
+    setModOpenFor(null);
+  };
+
   return (
     <>
-      {/* Main draggable wrapper - this is where dragHandleProps should be applied */}
       <div
         ref={rootRef}
         className={`${
@@ -211,8 +249,7 @@ export function OrderCard({
             ? "opacity-50 rotate-2 scale-105 transition-all duration-200"
             : "transition-all duration-200"
         }`}
-        {...dragHandleProps} // Apply drag handlers to the wrapper
-        {...props}
+        {...dragHandleProps} // (attrs/listeners from dnd-kit only)
       >
         <Card
           className={`h-full border-t-8 ${borderCls} ${
@@ -223,7 +260,6 @@ export function OrderCard({
               : "cursor-grab active:cursor-grabbing"
           }`}
         >
-          {/* Header - Now part of draggable area */}
           <CardHeader className="flex flex-row items-center justify-between bg-muted/50 py-3">
             <div className="space-y-0.5">
               <div className="font-extrabold text-xl tracking-tight">
@@ -238,7 +274,6 @@ export function OrderCard({
             ) : null}
           </CardHeader>
 
-          {/* Content - Fully draggable */}
           <CardContent className="pt-4 pb-2 flex-1">
             <div className="relative h-[300px] overflow-y-auto pr-1">
               {Object.entries(itemsByDept).map(([dept, items]) => (
@@ -252,11 +287,13 @@ export function OrderCard({
                     {items.map((it) => {
                       const isChecked = it.itemStatus === "checked";
                       const isCancelled = it.itemStatus === "cancelled";
+                      const mods = Array.isArray(it.mods) ? it.mods : [];
+                      const modsCount = mods.length;
 
                       return (
                         <li
                           key={`${order.id}-${dept}-${it.id}`}
-                          className="grid grid-cols-[auto_auto_1fr] gap-3 items-center pb-2 border-b last:border-0 rounded transition-colors select-none"
+                          className="grid grid-cols-[auto_auto_1fr_auto] gap-3 items-center pb-2 border-b last:border-0 rounded transition-colors select-none"
                           onClick={(e) => handleItemClick(e, order.id, it.id)}
                         >
                           <div className={triBoxCls(it.itemStatus)}>
@@ -289,10 +326,71 @@ export function OrderCard({
                                   ? "line-through text-muted-foreground"
                                   : "text-muted-foreground"
                               }`}
-                              title={(it.mods || []).join(", ")}
+                              title={mods.join(", ")}
                             >
-                              {(it.mods || []).join(", ")}
+                              {mods.join(", ")}
                             </div>
+                          </div>
+
+                          {/* Notes/Modifiers button — ONLY show if modsCount > 0 */}
+                          <div className="flex items-center gap-2">
+                            {modsCount > 0 ? (
+                              <>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="font-bold"
+                                  data-stop-item-click="true"
+                                  onMouseDown={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                  }}
+                                  onPointerDown={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                  }}
+                                  onClick={(e) => openMods(e, it)}
+                                  title="Notes / Modifiers"
+                                  aria-label="Notes / Modifiers"
+                                >
+                                  <PlusSquare className="w-4 h-4 mr-2" />
+                                  Notes ({modsCount})
+                                </Button>
+
+                                {/* Inline modal for this item */}
+                                <Dialog
+                                  open={modOpenFor === it.id}
+                                  onOpenChange={(o) => {
+                                    if (!o) setGuardForNextClick(); // overlay or close button
+                                    if (o) setModOpenFor(it.id);
+                                    else closeMods(true);
+                                  }}
+                                >
+                                  <DialogContent className="p-0 overflow-hidden">
+                                    <DialogHeader className="px-4 pt-4">
+                                      <DialogTitle className="text-base font-extrabold">
+                                        Modifiers for {it?.name || "Item"}
+                                      </DialogTitle>
+                                    </DialogHeader>
+
+                                    <div className="px-4 pb-4">
+                                      <div className="flex flex-wrap gap-2">
+                                        {mods.map((m, i) => (
+                                          <span
+                                            key={`cur-${i}`}
+                                            className="inline-flex items-center rounded-full text-xs font-bold bg-muted px-3 py-1"
+                                            data-stop-item-click="true"
+                                          >
+                                            {m}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </DialogContent>
+                                </Dialog>
+                              </>
+                            ) : null}
                           </div>
                         </li>
                       );
@@ -303,16 +401,13 @@ export function OrderCard({
             </div>
           </CardContent>
 
-          {/* Footer - Also draggable but with interactive elements */}
           <CardFooter className="p-0">
             <div className="bg-muted/50 w-full p-4">
-              {/* mobile: stacked; desktop: one line */}
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                {/* Left: COUNTDOWN button (opens ETA dialog) */}
                 <button
                   type="button"
                   onClick={(e) => {
-                    e.stopPropagation(); // Prevent triggering drag
+                    e.stopPropagation();
                     setEtaDialog &&
                       setEtaDialog({ open: true, orderId: order.id });
                   }}
@@ -325,14 +420,13 @@ export function OrderCard({
                   {overdue}
                 </button>
 
-                {/* Right: actions (inline on desktop) */}
                 {insideDialog ? (
                   !isCompleted ? (
                     <div className="flex justify-center md:justify-end">
                       <Button
                         className={`w-full sm:max-w-xs md:w-auto justify-center font-bold ${actionClass}`}
                         onClick={(e) => {
-                          e.stopPropagation(); // Prevent triggering drag
+                          e.stopPropagation();
                           handlePrimaryClick();
                         }}
                       >
@@ -346,7 +440,7 @@ export function OrderCard({
                       <Button
                         className="w-full md:w-auto justify-center font-bold bg-slate-700 hover:bg-slate-800"
                         onClick={(e) => {
-                          e.stopPropagation(); // Prevent triggering drag
+                          e.stopPropagation();
                           openUndo();
                         }}
                         title={t("Undo")}
@@ -358,7 +452,7 @@ export function OrderCard({
                       <Button
                         className={`w-full md:w-auto justify-center font-bold ${actionClass}`}
                         onClick={(e) => {
-                          e.stopPropagation(); // Prevent triggering drag
+                          e.stopPropagation();
                           handlePrimaryClick();
                         }}
                       >
@@ -366,12 +460,11 @@ export function OrderCard({
                       </Button>
                     )}
 
-                    {/* Details: icon-only */}
                     <Button
                       variant="outline"
                       className="w-full md:w-auto justify-center font-bold"
                       onClick={(e) => {
-                        e.stopPropagation(); // Prevent triggering drag
+                        e.stopPropagation();
                         setOrderDialog({ open: true, orderId: order.id });
                       }}
                       aria-label={t("View details")}
